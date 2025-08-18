@@ -179,35 +179,45 @@ pip install -e ".[dev]"
 ```
 video-kb [OPTIONS] COMMAND [ARGS]...
 
-Extract transcripts from YouTube playlists and channels using yt-dlp
+Extract transcribed text from videos using yt-dlp
 
 Commands:
-  download         Extract transcripts from all videos in a playlist or channel
+  download   Download transcripts from a single video, playlist, or channel.
 
-Global Options:
-  --version        Show version and exit
-  --help           Show this message and exit
+Options:
+  --version                     Show version and exit
+  --install-completion          Install completion for the current shell.
+  --show-completion             Show completion for the current shell, to copy
+                               it or customize the installation.
+  --help                        Show this message and exit.
 ```
 
 #### Download Command
 ```
 video-kb download [OPTIONS] URL
 
+Download transcripts from a single video, playlist, or channel.
+
 Arguments:
-  URL            Playlist or Channel URL to extract transcripts from [required]
+  URL  Video, Playlist or Channel URL to download transcripts from [required]
 
 Options:
-  -o, --output PATH              Output directory for transcripts [default: ./transcripts]
-  --min-sleep INTEGER            Minimum seconds to sleep between downloads [default: 10]
-  --max-sleep INTEGER            Maximum seconds to sleep between downloads [default: 30]
-  --cookies-from TEXT            Extract cookies from browser (firefox, chrome, safari, etc)
-  -l, --lang TEXT                Subtitle languages to download (e.g. 'en', 'es'). Can be specified multiple times.
-  -v, --verbose                  Enable verbose output
+  --output        -o      PATH     Output directory for transcripts [default: transcripts]
+  --min-sleep             INTEGER  Minimum seconds to sleep between downloads [default: 10]
+  --max-sleep             INTEGER  Maximum seconds to sleep between downloads [default: 30]
+  --cookies-from          TEXT     Extract cookies from browser (firefox, chrome, safari, etc)
+  --lang          -l      TEXT     Subtitle languages to download (e.g. 'en', 'es'). Can be
+                                   specified multiple times.
+  --verbose       -v               Enable verbose output
+  --help                           Show this message and exit.
 ```
 
 ### Basic Usage
 
 ```bash
+# Extract transcript from a single video
+video-kb download "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
 # Extract transcripts from all videos in a channel (conservative defaults)
 video-kb download "https://www.youtube.com/@channelname"
 
