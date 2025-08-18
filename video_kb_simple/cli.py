@@ -11,7 +11,6 @@ from rich.table import Table
 
 from video_kb_simple import __version__
 from video_kb_simple.downloader import BatchResult, VideoDownloader
-from video_kb_simple.safe_exit import setup_safe_exit
 
 app = typer.Typer(
     name="video-kb",
@@ -74,9 +73,6 @@ def download(
         console.print(f"[green]Languages:[/green] {', '.join(langs)}")
 
     try:
-        # Setup graceful exit handling
-        setup_safe_exit(console)
-
         downloader = VideoDownloader(
             output_dir=output_dir,
             verbose=verbose,

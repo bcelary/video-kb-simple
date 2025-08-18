@@ -12,6 +12,8 @@ import yt_dlp
 from pydantic import BaseModel, Field
 from rich.console import Console
 
+from video_kb_simple.safe_exit import GracefulExitHandler, atomic_file_write, setup_safe_exit
+
 
 class VideoInfo(BaseModel):
     """Video information model."""
@@ -75,6 +77,11 @@ class VideoDownloader:
         self.max_sleep_interval = max_sleep_interval
         self.browser_for_cookies = browser_for_cookies
         self.console = Console()
+        self._temp_dirs: list[Path] = []  # Track temp directories for cleanup
+
+        # Setup safe exit handling directly in the downloader
+        self.exit_handler: GracefulExitHandler = setup_safe_exit(self.console)
+
         self._validate_dependencies()
 
     def _create_ytdlp_options(
@@ -443,6 +450,10 @@ class VideoDownloader:
         # Create persistent temporary directory (preserved across retry attempts for yt-dlp optimization)
         temp_dir = Path(tempfile.mkdtemp(prefix="video_kb_", dir=self.output_dir))
 
+        # Track temp directory for cleanup and register with exit handler
+        self._temp_dirs.append(temp_dir)
+        self.exit_handler.register_cleanup(lambda: self._cleanup_temp_dirs())
+
         try:
             # Create yt-dlp output templates for temp directory
             subtitle_template = str(
@@ -508,11 +519,18 @@ class VideoDownloader:
                             )
                         return final_files
 
-                    # Success: move all available files to final location
+                    # Success: move all available files to final location using atomic writes
                     for temp_file in temp_files:
                         if temp_file.is_file():  # Skip directories
                             final_path = self.output_dir / temp_file.name
-                            temp_file.rename(final_path)
+
+                            # Use atomic file write to ensure integrity
+                            with atomic_file_write(final_path, console=self.console) as atomic_path:
+                                # Copy content from temp file to atomic temp file
+                                shutil.copy2(temp_file, atomic_path)
+
+                            # Remove the original temp file after successful atomic write
+                            temp_file.unlink()
                             final_files.append(final_path)
 
                     if self.verbose:
@@ -555,6 +573,10 @@ class VideoDownloader:
                     # Directory not empty, clean it up
                     shutil.rmtree(temp_dir, ignore_errors=True)
 
+            # Remove from tracking list once cleaned up
+            if temp_dir in self._temp_dirs:
+                self._temp_dirs.remove(temp_dir)
+
     def _validate_dependencies(self) -> None:
         """Validate required dependencies."""
         try:
@@ -575,3 +597,16 @@ class VideoDownloader:
 
         if self.verbose:
             self.console.print("[green]✓[/green] Dependencies validated")
+
+    def _cleanup_temp_dirs(self) -> None:
+        """Clean up any remaining temporary directories."""
+        for temp_dir in self._temp_dirs:
+            if temp_dir.exists():
+                try:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    if self.verbose:
+                        self.console.print(
+                            f"[yellow]Cleaned up temp directory: {temp_dir}[/yellow]"
+                        )
+                except Exception:  # nosec B110
+                    pass  # Ignore cleanup errors during shutdown
