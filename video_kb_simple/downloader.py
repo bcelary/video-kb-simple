@@ -11,6 +11,7 @@ from typing import Any
 import yt_dlp
 from pydantic import BaseModel, Field
 from rich.console import Console
+from slugify import slugify
 
 from video_kb_simple.safe_exit import GracefulExitHandler, atomic_file_write, setup_safe_exit
 
@@ -430,6 +431,38 @@ class VideoDownloader:
                 self.console.print(f"[red]Playlist processing failed: {e!s}[/red]")
             raise RuntimeError(f"Failed to process playlist: {e!s}") from e
 
+    def _create_slugified_filename(
+        self, original_filename: str, info_dict: dict[str, Any] | None
+    ) -> str:
+        """Create a new filename with slugified title replacing video_id.
+
+        Args:
+            original_filename: Original filename from yt-dlp
+            info_dict: Video metadata from yt-dlp
+
+        Returns:
+            New filename with video_id_slugified-title replacing just video_id
+        """
+        if not info_dict:
+            return original_filename
+
+        video_id = info_dict.get("id", "")
+        title = info_dict.get("title", "")
+
+        if not video_id or not title:
+            return original_filename
+
+        # Slugify title (max 80 chars)
+        slugified_title = slugify(title, max_length=80)
+        if not slugified_title:
+            return original_filename
+
+        # Replace video_id with video_id_slugified-title in the filename
+        new_video_part = f"{video_id}_{slugified_title}"
+        new_filename = original_filename.replace(video_id, new_video_part)
+
+        return new_filename
+
     def _download_video_files(
         self,
         url: str,
@@ -519,10 +552,28 @@ class VideoDownloader:
                             )
                         return final_files
 
+                    # Extract video info from JSON metadata file for slugified filenames
+                    info_dict = None
+                    for temp_file in temp_files:
+                        if temp_file.suffix == ".json":
+                            try:
+                                import json
+
+                                with temp_file.open("r", encoding="utf-8") as f:
+                                    info_dict = json.load(f)
+                                break
+                            except Exception:  # nosec B110
+                                # If JSON parsing fails, continue with original naming
+                                pass
+
                     # Success: move all available files to final location using atomic writes
                     for temp_file in temp_files:
                         if temp_file.is_file():  # Skip directories
-                            final_path = self.output_dir / temp_file.name
+                            # Create new filename with slugified title
+                            new_filename = self._create_slugified_filename(
+                                temp_file.name, info_dict
+                            )
+                            final_path = self.output_dir / new_filename
 
                             # Use atomic file write to ensure integrity
                             with atomic_file_write(final_path, console=self.console) as atomic_path:
