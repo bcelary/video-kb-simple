@@ -1,0 +1,48 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff (linter)
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+        require_serial: false
+      - id: ruff-format
+        name: ruff (formatter)
+        entry: uv run ruff format
+        language: system
+        types: [python]
+        require_serial: false
+      - id: mypy
+        name: mypy
+        entry: uv run mypy
+        language: system
+        types: [python]
+        require_serial: false
+      - id: bandit
+        name: bandit
+        entry: uv run bandit -c pyproject.toml -r
+        language: system
+        types: [python]
+        require_serial: false
+      - id: pytest
+        name: pytest
+        entry: uv run pytest
+        language: system
+        types: [python]
+        pass_filenames: false
+        always_run: true
