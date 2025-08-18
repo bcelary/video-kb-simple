@@ -2,7 +2,9 @@
 
 ## Project Overview
 
-Modern Python CLI tool built with 2025 best practices for downloading and extracting transcribed text from videos using yt-dlp. Features single-source configuration, optimized tooling, and zero duplication.
+Modern Python CLI tool for bulk transcript extraction from YouTube playlists/channels. Built with 2025 best practices: single-source configuration, optimized tooling, and zero duplication.
+
+**For CLI usage details, see [README.md](./README.md)**
 
 ## Quick Start
 
@@ -14,8 +16,8 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync --extra dev          # Install all dependencies
 uv run pre-commit install    # Setup git hooks
 
-# 3. Test the CLI
-uv run video-kb download "https://youtu.be/dQw4w9WgXcQ" --verbose
+# 3. Test the CLI (see README.md for usage details)
+uv run video-kb --help
 ```
 
 ## Daily Development Workflow
@@ -81,28 +83,17 @@ tests/                  # Comprehensive test suite
 └── test_downloader.py  # Core logic unit tests
 ```
 
-## Usage Examples
+## Development Testing
 
-### Basic Usage
 ```bash
-# Download transcript
-video-kb download "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+# Quick CLI test
+uv run video-kb --help
 
-# Custom output directory and format
-video-kb download "https://youtu.be/dQw4w9WgXcQ" -o ./transcripts -f vtt
-
-# Verbose output
-video-kb download "https://youtu.be/dQw4w9WgXcQ" --verbose
+# Test with real playlist (for development - see README.md for usage)
+uv run video-kb download "https://www.youtube.com/@channelname" --verbose
 ```
 
-### Development Testing
-```bash
-# Test with a real video (for development)
-video-kb download "https://www.youtube.com/watch?v=dQw4w9WgXcQ" --verbose
-
-# Check available formats
-video-kb list-formats "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-```
+**For complete CLI usage examples, see [README.md](./README.md)**
 
 ## Code Quality Pipeline
 
@@ -137,7 +128,7 @@ uv sync --extra dev && uv run pre-commit install
 # 1. Make code changes
 # 2. Test locally
 uv run pytest
-uv run video-kb download "https://youtu.be/dQw4w9WgXcQ"
+uv run video-kb --help  # Quick CLI test
 
 # 3. Commit (pre-commit runs automatically)
 git add . && git commit -m "feat: add new feature"

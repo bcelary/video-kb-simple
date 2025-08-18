@@ -20,7 +20,7 @@ sequenceDiagram
     VD->>VD: _validate_dependencies()
     Note over VD: Check yt-dlp, ffmpeg, ffprobe availability
 
-    CLI->>VD: download_playlist_transcripts(url, max_videos, subtitles_langs)
+    CLI->>VD: download_playlist_transcripts(url, subtitles_langs)
 
     Note over VD: Step 1: URL normalization
     VD->>VD: _normalize_playlist_url(url)
@@ -44,9 +44,6 @@ sequenceDiagram
             VD->>VD: sleep(random(60, 120))
         end
 
-        alt Max videos limit reached
-            Note over VD: Break loop if max_videos exceeded
-        end
 
         Note over VD: Step 2: Download individual video transcript
         VD->>VD: _download_video_files(video_url, subtitles_langs)
@@ -121,7 +118,7 @@ sequenceDiagram
 4. **Conservative Rate Limiting**: Configurable min/max sleep intervals (default 10-30s) between videos
 5. **Extended Breaks**: 60-120 second pauses every 5 videos to avoid detection patterns
 6. **Aggressive Rate Limit Backoff**: 300-600 second delays (5-10 minutes) when hitting HTTP 429
-7. **Atomic Download Archives**: Thread-safe tracking of completed downloads for resume capability
+7. **Atomic File Operations**: Thread-safe file writes ensuring data integrity
 8. **Browser Cookie Support**: `--cookies-from firefox` for authenticated access
 9. **Safe Error Handling**: Continue processing remaining videos even if individual downloads fail
 
@@ -134,7 +131,6 @@ sequenceDiagram
 - 🛡️ Conservative rate limiting with randomized delays and extended breaks
 - 🍪 Browser cookie support for authenticated access to private content
 - 📊 Rich CLI interface with progress tracking and detailed summaries
-- 💾 Download archive support for resuming interrupted sessions
 - 🔒 Atomic file operations ensuring data integrity during extraction
 - 🎯 Type-safe code with full type annotations
 - 🚀 Modern Python tooling (uv, ruff, mypy)
@@ -205,7 +201,7 @@ Options:
   --min-sleep INTEGER            Minimum seconds to sleep between downloads [default: 10]
   --max-sleep INTEGER            Maximum seconds to sleep between downloads [default: 30]
   --cookies-from TEXT            Extract cookies from browser (firefox, chrome, safari, etc)
-  --download-archive PATH        Path to download archive file (tracks completed downloads)
+  -l, --lang TEXT                Subtitle languages to download (e.g. 'en', 'es'). Can be specified multiple times.
   -v, --verbose                  Enable verbose output
 ```
 
@@ -236,12 +232,8 @@ video-kb download "https://www.youtube.com/@channelname" \
   --min-sleep 15 \
   --max-sleep 45 \
   --cookies-from firefox \
-  --download-archive ./my_downloads.txt \
   --verbose
 
-# Resume interrupted downloads using archive
-video-kb download "https://www.youtube.com/@channelname" \
-  --download-archive ./my_downloads.txt
 ```
 
 ## Development
@@ -318,10 +310,11 @@ video-kb-simple/
 ## Dependencies
 
 ### Runtime Dependencies
-- **typer[all]**: Modern CLI framework with rich features
-- **yt-dlp**: Video/audio downloader and metadata extractor
+- **typer**: Modern CLI framework with rich features
+- **yt-dlp[curl-cffi]**: Video/audio downloader and metadata extractor with enhanced HTTP support
 - **rich**: Beautiful terminal output
 - **pydantic**: Data validation and type safety
+- **python-slugify**: Clean URL slug generation for filenames
 
 ### Development Dependencies
 - **pytest**: Testing framework
@@ -354,12 +347,11 @@ If you encounter frequent rate limiting:
 - Reduce concurrent processing by running smaller batches
 
 ### Permission errors
-Make sure you have write permissions to the output directory and download archive file.
+Make sure you have write permissions to the output directory.
 
 ### Incomplete extractions (forced termination)
 If the CLI is forcefully terminated (Ctrl+C, kill), you may find:
 - **Temporary files**: yt-dlp temporary files that can be safely deleted
 - **Complete transcripts**: Files with the format `YYYY-MM-DD_videoId_title.lang.ext` are guaranteed complete due to atomic operations
-- **Download archive**: Use `--download-archive` to resume from where you left off
 
-The tool uses atomic file operations and download archives to ensure resumable and reliable bulk extraction.
+The tool uses atomic file operations to ensure reliable bulk extraction.
