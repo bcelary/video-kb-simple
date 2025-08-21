@@ -1,12 +1,13 @@
 """Video downloader and transcript extractor using yt-dlp."""
 
+import json
 import random
 import re
 import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import yt_dlp
 from pydantic import BaseModel, Field
@@ -52,13 +53,28 @@ class BatchResult(BaseModel):
 class VideoDownloader:
     """Downloads videos and extracts transcripts using yt-dlp."""
 
+    DEFAULT_MIN_SLEEP_INTERVAL = 10
+    DEFAULT_MAX_SLEEP_INTERVAL = 30
+    SOCKET_TIMEOUT = 30
+    IMPERSONATE_SLEEP_MIN = 3
+    IMPERSONATE_SLEEP_MAX = 7
+    MAX_RETRIES = 3
+    BASE_RETRY_DELAY = 30
+    EXTENDED_BREAK_MIN = 60
+    EXTENDED_BREAK_MAX = 120
+    RATE_LIMIT_BREAK_MIN = 300
+    RATE_LIMIT_BREAK_MAX = 600
+    SLUG_MAX_LENGTH = 80
+    VIDEOS_PER_EXTENDED_BREAK = 5
+    DEFAULT_SUBTITLES_LANGS: ClassVar[list[str]] = ["en"]
+
     def __init__(
         self,
         output_dir: Path = Path("./transcripts"),
         verbose: bool = False,
         force_download: bool = False,
-        min_sleep_interval: int = 10,
-        max_sleep_interval: int = 30,
+        min_sleep_interval: int = DEFAULT_MIN_SLEEP_INTERVAL,
+        max_sleep_interval: int = DEFAULT_MAX_SLEEP_INTERVAL,
         browser_for_cookies: str | None = None,
     ):
         """Initialize the downloader.
@@ -100,7 +116,7 @@ class VideoDownloader:
         base_options: dict[str, Any] = {
             "sleep_interval": self.min_sleep_interval,
             "max_sleep_interval": self.max_sleep_interval,
-            "socket_timeout": 30,
+            "socket_timeout": self.SOCKET_TIMEOUT,
             "quiet": not self.verbose,
             "no_warnings": not self.verbose,
         }
@@ -113,7 +129,9 @@ class VideoDownloader:
             base_options.update(
                 {
                     "impersonate": "safari",
-                    "sleep_requests": random.randint(3, 7),  # nosec B311
+                    "sleep_requests": random.randint(
+                        self.IMPERSONATE_SLEEP_MIN, self.IMPERSONATE_SLEEP_MAX
+                    ),  # nosec B311
                 }
             )
 
@@ -367,9 +385,9 @@ class VideoDownloader:
                         )
                     time.sleep(delay)
 
-                # Add extra delay after every 5 videos to be more conservative
-                if i > 0 and (i + 1) % 5 == 0:
-                    extra_delay = random.randint(60, 120)  # nosec B311 - 1-2 minute pause every 5 videos
+                # Add extra delay after every VIDEOS_PER_EXTENDED_BREAK videos to be more conservative
+                if i > 0 and (i + 1) % self.VIDEOS_PER_EXTENDED_BREAK == 0:
+                    extra_delay = random.randint(self.EXTENDED_BREAK_MIN, self.EXTENDED_BREAK_MAX)  # nosec B311
                     if self.verbose:
                         self.console.print(
                             f"[yellow]Taking extended break ({extra_delay}s) after {i + 1} videos...[/yellow]"
@@ -406,7 +424,9 @@ class VideoDownloader:
                         or "too many requests" in error_str
                         or "rate limit" in error_str
                     ):
-                        rate_limit_delay = random.randint(300, 600)  # nosec B311 - 5-10 minute delay for rate limits
+                        rate_limit_delay = random.randint(
+                            self.RATE_LIMIT_BREAK_MIN, self.RATE_LIMIT_BREAK_MAX
+                        )  # nosec B311
                         if self.verbose:
                             self.console.print(
                                 f"[red]Rate limited! Taking extended break ({rate_limit_delay}s)...[/red]"
@@ -455,8 +475,8 @@ class VideoDownloader:
         if not video_id or not title:
             return original_filename
 
-        # Slugify title (max 80 chars)
-        slugified_title = slugify(title, max_length=80)
+        # Slugify title (max SLUG_MAX_LENGTH chars)
+        slugified_title = slugify(title, max_length=self.SLUG_MAX_LENGTH)
         if not slugified_title:
             return original_filename
 
@@ -481,7 +501,7 @@ class VideoDownloader:
             List of paths to downloaded transcript and metadata files
         """
         if subtitles_langs is None:
-            subtitles_langs = ["en"]
+            subtitles_langs = self.DEFAULT_SUBTITLES_LANGS
 
         # Create persistent temporary directory (preserved across retry attempts for yt-dlp optimization)
         temp_dir = Path(tempfile.mkdtemp(prefix="video_kb_", dir=self.output_dir))
@@ -502,9 +522,6 @@ class VideoDownloader:
                 self.console.print("[blue]Downloading:[/blue] subtitles + metadata JSON")
                 self.console.print(f"[blue]Temp directory:[/blue] {temp_dir}")
 
-            max_attempts = 3
-            base_delay = 30
-
             ydl_opts = {
                 "writesubtitles": True,
                 "writeautomaticsub": True,
@@ -517,17 +534,17 @@ class VideoDownloader:
                 },
             }
 
-            for attempt in range(max_attempts):
+            for attempt in range(self.MAX_RETRIES):
                 try:
                     if attempt > 0:
-                        delay = base_delay * (2 ** (attempt - 1))
+                        delay = self.BASE_RETRY_DELAY * (2 ** (attempt - 1))
                         if self.verbose:
                             self.console.print(
-                                f"[yellow]Waiting {delay}s before retry {attempt + 1}/{max_attempts}[/yellow]"
+                                f"[yellow]Waiting {delay}s before retry {attempt + 1}/{self.MAX_RETRIES}[/yellow]"
                             )
                         time.sleep(delay)
 
-                    use_impersonation = attempt == max_attempts - 1
+                    use_impersonation = attempt == self.MAX_RETRIES - 1
                     if self.verbose and use_impersonation:
                         self.console.print(
                             "[yellow]Using browser impersonation for final attempt[/yellow]"
@@ -560,14 +577,15 @@ class VideoDownloader:
                     for temp_file in temp_files:
                         if temp_file.suffix == ".json":
                             try:
-                                import json
-
                                 with temp_file.open("r", encoding="utf-8") as f:
                                     info_dict = json.load(f)
                                 break
-                            except Exception:  # nosec B110
-                                # If JSON parsing fails, continue with original naming
-                                pass
+                            except Exception as e:
+                                if self.verbose:
+                                    self.console.print(
+                                        f"[yellow]Failed to parse metadata JSON: {e!s}[/yellow]"
+                                    )
+                                info_dict = None
 
                     # Success: move all available files to final location using atomic writes
                     for temp_file in temp_files:
@@ -600,7 +618,7 @@ class VideoDownloader:
 
                 except Exception as e:
                     # Only real failures reach here (network errors, rate limits, access denied, etc.)
-                    if attempt == max_attempts - 1:
+                    if attempt == self.MAX_RETRIES - 1:
                         if self.verbose:
                             self.console.print("[red]All retry attempts exhausted[/red]")
                         raise RuntimeError(f"Failed to download subtitles: {e!s}") from e
