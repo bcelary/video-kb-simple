@@ -56,6 +56,7 @@ class VideoDownloader:
         self,
         output_dir: Path = Path("./transcripts"),
         verbose: bool = False,
+        force_download: bool = False,
         min_sleep_interval: int = 10,
         max_sleep_interval: int = 30,
         browser_for_cookies: str | None = None,
@@ -65,6 +66,7 @@ class VideoDownloader:
         Args:
             output_dir: Directory to save transcripts
             verbose: Enable verbose output
+            force_download: Re-download transcripts even if they already exist
             min_sleep_interval: Minimum seconds to sleep between requests
             max_sleep_interval: Maximum seconds to sleep between requests
             browser_for_cookies: Browser to extract cookies from (firefox, chrome, etc)
@@ -74,16 +76,22 @@ class VideoDownloader:
         """
         self.output_dir = output_dir
         self.verbose = verbose
+        self.force_download = force_download
         self.min_sleep_interval = min_sleep_interval
         self.max_sleep_interval = max_sleep_interval
         self.browser_for_cookies = browser_for_cookies
         self.console = Console()
         self._temp_dirs: list[Path] = []  # Track temp directories for cleanup
+        self._existing_video_ids: set[str] = set()  # In-memory cache of processed video IDs
 
         # Setup safe exit handling directly in the downloader
         self.exit_handler: GracefulExitHandler = setup_safe_exit(self.console)
 
         self._validate_dependencies()
+
+        # Index existing transcripts unless force_download is enabled
+        if not self.force_download:
+            self._index_existing_transcripts()
 
     def _create_ytdlp_options(
         self, use_impersonation: bool = False, **kwargs: Any
@@ -193,45 +201,31 @@ class VideoDownloader:
         Returns:
             (PlaylistInfo, [video_url]) - Artificial playlist with one video
         """
-        # Extract basic info without full metadata to minimize API calls
-        ydl_opts = self._create_ytdlp_options(extract_flat=True)
+        # Extract video ID from URL without API call
+        video_id = self._extract_video_id_from_url(video_url) or "unknown"
 
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(video_url, download=False)
+        # Create minimal playlist info without API calls - all fields are for display only
+        # Actual video metadata will be fetched later during _download_video_files()
+        playlist_info = PlaylistInfo(
+            title="Single Video Playlist",
+            playlist_id=video_id,
+            uploader=None,  # Will be available after processing if needed
+            video_count=1,
+            url=video_url,
+            playlist_type="single_video",
+        )
 
-                if not info:
-                    raise RuntimeError("No video information extracted")
-
-                # Create artificial playlist info for single video
-                playlist_info = PlaylistInfo(
-                    title=f"Single Video: {info.get('title', 'Unknown Video')}",
-                    playlist_id=info.get("id", "unknown"),
-                    uploader=info.get("uploader", info.get("channel", "Unknown")),
-                    video_count=1,
-                    url=video_url,
-                    playlist_type="single_video",
-                )
-
-                return playlist_info, [video_url]
-
-        except Exception as e:
-            if self.verbose:
-                self.console.print(f"[red]Failed to extract video info: {e!s}[/red]")
-            raise RuntimeError(f"Failed to extract video info: {e!s}") from e
+        return playlist_info, [video_url]
 
     def _extract_playlist_info(
         self,
         url: str,
-        use_impersonation: bool = False,
     ) -> tuple[PlaylistInfo, list[str]]:
         """Extract playlist info and video URLs only (no metadata) to minimize API calls."""
 
         # Normalize URL for optimal processing
         normalized_url, playlist_type = self._normalize_playlist_url(url)
-        ydl_opts = self._create_ytdlp_options(
-            use_impersonation=use_impersonation, extract_flat=True
-        )
+        ydl_opts = self._create_ytdlp_options(extract_flat=True)
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -342,6 +336,28 @@ class VideoDownloader:
             processed_videos = 0
 
             for i, video_url in enumerate(video_urls):
+                # Check max_videos limit
+                if max_videos and processed_videos >= max_videos:
+                    if self.verbose:
+                        self.console.print(f"[blue]Reached max_videos limit ({max_videos})[/blue]")
+                    break
+
+                if self.verbose:
+                    self.console.print(
+                        f"\n[blue][{i + 1}/{len(video_urls)}][/blue] Processing: {video_url}"
+                    )
+
+                # Check if video should be skipped (unless force_download is enabled)
+                if not self.force_download:
+                    video_id = self._extract_video_id_from_url(video_url)
+                    if video_id and video_id in self._existing_video_ids:
+                        skipped_videos += 1
+                        if self.verbose:
+                            self.console.print(
+                                f"[yellow]⏭ Skipping {video_id} (already exists)[/yellow]"
+                            )
+                        continue
+
                 # Add rate limiting delay between video processing
                 if i > 0:  # Skip delay for first video
                     delay = random.randint(self.min_sleep_interval, self.max_sleep_interval)  # nosec B311
@@ -360,20 +376,7 @@ class VideoDownloader:
                         )
                     time.sleep(extra_delay)
 
-                if self.verbose:
-                    self.console.print(
-                        f"\n[blue][{i + 1}/{len(video_urls)}][/blue] Processing: {video_url}"
-                    )
-
                 try:
-                    # Check max_videos limit
-                    if max_videos and processed_videos >= max_videos:
-                        if self.verbose:
-                            self.console.print(
-                                f"[blue]Reached max_videos limit ({max_videos})[/blue]"
-                            )
-                        break
-
                     if self.verbose:
                         self.console.print(f"[green]Processing:[/green] {video_url}")
 
@@ -648,6 +651,28 @@ class VideoDownloader:
 
         if self.verbose:
             self.console.print("[green]✓[/green] Dependencies validated")
+
+    def _index_existing_transcripts(self) -> None:
+        """Build in-memory set of existing video IDs from metadata filenames."""
+        if not self.output_dir.exists():
+            return
+
+        json_files = list(self.output_dir.glob("*.info.json"))
+
+        for json_file in json_files:
+            # Extract video ID from filename pattern: YYYY-MM-DD_{VIDEO_ID}[_slug].info.json
+            filename = json_file.stem  # Remove .info.json extension
+
+            # Split by underscore and get the second part (video ID)
+            parts = filename.split("_")
+            if len(parts) >= 2:
+                video_id = parts[1]  # First part is date, second is video ID
+                self._existing_video_ids.add(video_id)
+
+        if self.verbose and self._existing_video_ids:
+            self.console.print(
+                f"[blue]Found {len(self._existing_video_ids)} existing transcripts to skip[/blue]"
+            )
 
     def _cleanup_temp_dirs(self) -> None:
         """Clean up any remaining temporary directories."""

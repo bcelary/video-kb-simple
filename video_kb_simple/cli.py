@@ -35,6 +35,10 @@ def download(
     output_dir: Annotated[
         Path, typer.Option("--output", "-o", help="Output directory for transcripts")
     ] = Path("./transcripts"),
+    force_download: Annotated[
+        bool,
+        typer.Option("--force", "-f", help="Re-download transcripts even if they already exist"),
+    ] = False,
     min_sleep: Annotated[
         int, typer.Option("--min-sleep", help="Minimum seconds to sleep between downloads")
     ] = 10,
@@ -52,13 +56,24 @@ def download(
         typer.Option(
             "--lang",
             "-l",
-            help="Subtitle languages to download (e.g. 'en', 'es'). Can be specified multiple times.",
+            help="Subtitle languages to download (e.g. 'en', 'es', 'en,pl'). Can be specified multiple times or comma-separated.",
         ),
     ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output")] = False,
 ) -> None:
     """Download transcripts from a single video, playlist, or channel."""
     output_dir.mkdir(exist_ok=True)
+
+    # Handle comma-separated language strings and multiple flags
+    processed_languages = []
+    if languages:
+        for lang in languages:
+            # Split comma-separated languages and strip whitespace
+            processed_languages.extend([s.strip() for s in lang.split(",")])
+        # Remove duplicates while preserving order
+        processed_languages = list(dict.fromkeys(processed_languages))
+    else:
+        processed_languages = ["en"]
 
     if verbose:
         console.print(f"[green]Downloading transcripts from:[/green] {url}")
@@ -69,13 +84,13 @@ def download(
         )
         if browser_cookies:
             console.print(f"[green]Using cookies from:[/green] {browser_cookies}")
-        langs = languages or ["en"]
-        console.print(f"[green]Languages:[/green] {', '.join(langs)}")
+        console.print(f"[green]Languages:[/green] {', '.join(processed_languages)}")
 
     try:
         downloader = VideoDownloader(
             output_dir=output_dir,
             verbose=verbose,
+            force_download=force_download,
             min_sleep_interval=min_sleep,
             max_sleep_interval=max_sleep,
             browser_for_cookies=browser_cookies,
@@ -83,7 +98,7 @@ def download(
 
         result = downloader.download_playlist_transcripts(
             playlist_url=url,
-            subtitles_langs=languages or ["en"],
+            subtitles_langs=processed_languages,
         )
 
         # Display results
