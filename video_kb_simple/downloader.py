@@ -486,6 +486,72 @@ class VideoDownloader:
 
         return new_filename
 
+    def _download_with_retry(
+        self,
+        url: str,
+        ydl_opts: dict[str, Any],
+        operation_name: str = "download",
+    ) -> Any:
+        """Download with retry logic and error handling.
+
+        Args:
+            url: Video URL to download
+            ydl_opts: yt-dlp options dictionary
+            operation_name: Name of operation for logging
+
+        Returns:
+            Video info dict-like object if extract_info was called, None otherwise
+        """
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                if attempt > 0:
+                    delay = self.BASE_RETRY_DELAY * (2 ** (attempt - 1))
+                    if self.verbose:
+                        self.console.print(
+                            f"[yellow]Waiting {delay}s before {operation_name} retry {attempt + 1}/{self.MAX_RETRIES}[/yellow]"
+                        )
+                    time.sleep(delay)
+
+                use_impersonation = attempt == self.MAX_RETRIES - 1
+                if self.verbose and use_impersonation:
+                    self.console.print(
+                        f"[yellow]Using browser impersonation for {operation_name}[/yellow]"
+                    )
+
+                options = self._create_ytdlp_options(
+                    use_impersonation=use_impersonation, **ydl_opts
+                )
+
+                with yt_dlp.YoutubeDL(options) as ydl:
+                    # For metadata extraction, we need the info dict
+                    if ydl_opts.get("writeinfojson") and not ydl_opts.get("writesubtitles"):
+                        info = ydl.extract_info(url, download=False)
+                        ydl.download([url])  # Also write the JSON file
+                        return info
+                    else:
+                        ydl.download([url])
+                        return None
+
+            except Exception as e:
+                if attempt == self.MAX_RETRIES - 1:
+                    if self.verbose:
+                        self.console.print(
+                            f"[red]{operation_name.capitalize()} failed after all attempts[/red]"
+                        )
+                    raise RuntimeError(f"Failed to {operation_name}: {e!s}") from e
+
+                error_str = str(e).lower()
+                if "429" in error_str or "too many requests" in error_str or "403" in error_str:
+                    if self.verbose:
+                        self.console.print(
+                            f"[yellow]Rate limited/blocked on {operation_name} attempt {attempt + 1}, retrying...[/yellow]"
+                        )
+                    continue
+                else:
+                    raise RuntimeError(f"Failed to {operation_name}: {e!s}") from e
+
+        return None
+
     def _download_video_files(
         self,
         url: str,
@@ -518,123 +584,95 @@ class VideoDownloader:
             metadata_template = str(temp_dir / "%(upload_date>%Y-%m-%d)s_%(id)s.%(ext)s")
 
             if self.verbose:
-                self.console.print(f"[blue]Languages:[/blue] {','.join(subtitles_langs)}")
-                self.console.print("[blue]Downloading:[/blue] subtitles + metadata JSON")
+                self.console.print(f"[blue]Requested languages:[/blue] {','.join(subtitles_langs)}")
                 self.console.print(f"[blue]Temp directory:[/blue] {temp_dir}")
 
-            ydl_opts = {
-                "writesubtitles": True,
-                "writeautomaticsub": True,
+            # Step 1: Always download metadata JSON first for subtitle analysis
+            if self.verbose:
+                self.console.print("[blue]Step 1: Downloading metadata JSON for analysis...[/blue]")
+
+            metadata_opts = {
                 "writeinfojson": True,
                 "skip_download": True,
-                "subtitleslangs": subtitles_langs,
-                "outtmpl": {
-                    "subtitle": subtitle_template,
-                    "infojson": metadata_template,
-                },
+                "writesubtitles": False,
+                "writeautomaticsub": False,
+                "outtmpl": {"infojson": metadata_template},
             }
 
-            for attempt in range(self.MAX_RETRIES):
-                try:
-                    if attempt > 0:
-                        delay = self.BASE_RETRY_DELAY * (2 ** (attempt - 1))
-                        if self.verbose:
-                            self.console.print(
-                                f"[yellow]Waiting {delay}s before retry {attempt + 1}/{self.MAX_RETRIES}[/yellow]"
-                            )
-                        time.sleep(delay)
+            metadata_info = self._download_with_retry(url, metadata_opts, "metadata download")
 
-                    use_impersonation = attempt == self.MAX_RETRIES - 1
-                    if self.verbose and use_impersonation:
-                        self.console.print(
-                            "[yellow]Using browser impersonation for final attempt[/yellow]"
-                        )
+            if self.verbose:
+                self.console.print("[green]✓ Metadata JSON downloaded successfully[/green]")
+                # TODO: Here we can analyze available subtitle languages from metadata_info
+                # and make intelligent decisions about which subtitles to download
 
-                    options = self._create_ytdlp_options(
-                        use_impersonation=use_impersonation, **ydl_opts
+            # Step 2: Download subtitles
+            if self.verbose:
+                self.console.print("[blue]Step 2: Downloading subtitles...[/blue]")
+
+            subtitle_opts = {
+                "writesubtitles": True,
+                "writeautomaticsub": True,
+                "writeinfojson": False,  # Already downloaded
+                "skip_download": True,
+                "subtitleslangs": subtitles_langs,
+                "outtmpl": {"subtitle": subtitle_template},
+            }
+
+            self._download_with_retry(url, subtitle_opts, "subtitle download")
+
+            # Process downloaded files
+            temp_files = list(temp_dir.glob("*"))
+            final_files: list[Path] = []
+
+            if not temp_files:
+                if self.verbose:
+                    self.console.print(
+                        f"[yellow]No files available for download from {url}[/yellow]"
                     )
+                return final_files
 
-                    # yt-dlp will reuse existing files in persistent temp directory across attempts
-                    with yt_dlp.YoutubeDL(options) as ydl:
-                        ydl.download([url])
+            # Extract video info from JSON metadata file for slugified filenames
+            info_dict = metadata_info
+            if not info_dict:
+                # Fallback: read from downloaded JSON file
+                for temp_file in temp_files:
+                    if temp_file.suffix == ".json":
+                        try:
+                            with temp_file.open("r", encoding="utf-8") as f:
+                                info_dict = json.load(f)
+                            break
+                        except Exception as e:
+                            if self.verbose:
+                                self.console.print(
+                                    f"[yellow]Failed to parse metadata JSON: {e!s}[/yellow]"
+                                )
+                            info_dict = None
 
-                    # If we reach here: yt-dlp completed successfully (downloads whatever is available)
-                    # Missing subtitles/metadata don't throw exceptions, only real failures do
-                    temp_files = list(temp_dir.glob("*"))
+            # Move all available files to final location using atomic writes
+            for temp_file in temp_files:
+                if temp_file.is_file():  # Skip directories
+                    # Create new filename with slugified title
+                    new_filename = self._create_slugified_filename(temp_file.name, info_dict)
+                    final_path = self.output_dir / new_filename
 
-                    final_files: list[Path] = []
+                    # Use atomic file write to ensure integrity
+                    with atomic_file_write(final_path, console=self.console) as atomic_path:
+                        # Copy content from temp file to atomic temp file
+                        shutil.copy2(temp_file, atomic_path)
 
-                    if not temp_files:
-                        # yt-dlp succeeded but no content available - this is valid
-                        if self.verbose:
-                            self.console.print(
-                                f"[yellow]No files available for download from {url}[/yellow]"
-                            )
-                        return final_files
+                    # Remove the original temp file after successful atomic write
+                    temp_file.unlink()
+                    final_files.append(final_path)
 
-                    # Extract video info from JSON metadata file for slugified filenames
-                    info_dict = None
-                    for temp_file in temp_files:
-                        if temp_file.suffix == ".json":
-                            try:
-                                with temp_file.open("r", encoding="utf-8") as f:
-                                    info_dict = json.load(f)
-                                break
-                            except Exception as e:
-                                if self.verbose:
-                                    self.console.print(
-                                        f"[yellow]Failed to parse metadata JSON: {e!s}[/yellow]"
-                                    )
-                                info_dict = None
+            if self.verbose:
+                subtitle_count = len([f for f in final_files if not f.name.endswith(".json")])
+                metadata_count = len([f for f in final_files if f.name.endswith(".json")])
+                self.console.print(
+                    f"[green]Downloaded {subtitle_count} subtitle file(s) + {metadata_count} metadata file(s)[/green]"
+                )
 
-                    # Success: move all available files to final location using atomic writes
-                    for temp_file in temp_files:
-                        if temp_file.is_file():  # Skip directories
-                            # Create new filename with slugified title
-                            new_filename = self._create_slugified_filename(
-                                temp_file.name, info_dict
-                            )
-                            final_path = self.output_dir / new_filename
-
-                            # Use atomic file write to ensure integrity
-                            with atomic_file_write(final_path, console=self.console) as atomic_path:
-                                # Copy content from temp file to atomic temp file
-                                shutil.copy2(temp_file, atomic_path)
-
-                            # Remove the original temp file after successful atomic write
-                            temp_file.unlink()
-                            final_files.append(final_path)
-
-                    if self.verbose:
-                        subtitle_count = len(
-                            [f for f in final_files if not f.name.endswith(".json")]
-                        )
-                        metadata_count = len([f for f in final_files if f.name.endswith(".json")])
-                        self.console.print(
-                            f"[green]Downloaded {subtitle_count} subtitle file(s) + {metadata_count} metadata file(s)[/green]"
-                        )
-
-                    return final_files
-
-                except Exception as e:
-                    # Only real failures reach here (network errors, rate limits, access denied, etc.)
-                    if attempt == self.MAX_RETRIES - 1:
-                        if self.verbose:
-                            self.console.print("[red]All retry attempts exhausted[/red]")
-                        raise RuntimeError(f"Failed to download subtitles: {e!s}") from e
-
-                    error_str = str(e).lower()
-                    if "429" in error_str or "too many requests" in error_str or "403" in error_str:
-                        if self.verbose:
-                            self.console.print(
-                                f"[yellow]Rate limited/blocked on attempt {attempt + 1}, retrying...[/yellow]"
-                            )
-                        continue
-                    else:
-                        raise RuntimeError(f"Failed to download subtitles: {e!s}") from e
-
-            # This should never be reached due to the logic above, but included for type safety
-            raise RuntimeError("Failed to download subtitles after all attempts")
+            return final_files
 
         finally:
             # Cleanup temp directory

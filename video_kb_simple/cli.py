@@ -39,12 +39,6 @@ def download(
         bool,
         typer.Option("--force", "-f", help="Re-download transcripts even if they already exist"),
     ] = False,
-    min_sleep: Annotated[
-        int, typer.Option("--min-sleep", help="Minimum seconds to sleep between downloads")
-    ] = 10,
-    max_sleep: Annotated[
-        int, typer.Option("--max-sleep", help="Maximum seconds to sleep between downloads")
-    ] = 30,
     browser_cookies: Annotated[
         str | None,
         typer.Option(
@@ -57,6 +51,12 @@ def download(
             "--lang",
             "-l",
             help="Subtitle languages to download (e.g. 'en', 'es', 'en,pl'). Can be specified multiple times or comma-separated.",
+        ),
+    ] = None,
+    max_videos: Annotated[
+        int | None,
+        typer.Option(
+            "--max-videos", help="Maximum number of videos to process from playlist/channel"
         ),
     ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output")] = False,
@@ -78,7 +78,6 @@ def download(
     if verbose:
         console.print(f"[green]Downloading transcripts from:[/green] {url}")
         console.print(f"[green]Output directory:[/green] {output_dir}")
-        console.print(f"[green]Sleep interval:[/green] {min_sleep}-{max_sleep}s")
         console.print(
             "[yellow]Note: Using conservative rate limiting to avoid bot detection[/yellow]"
         )
@@ -91,13 +90,12 @@ def download(
             output_dir=output_dir,
             verbose=verbose,
             force_download=force_download,
-            min_sleep_interval=min_sleep,
-            max_sleep_interval=max_sleep,
             browser_for_cookies=browser_cookies,
         )
 
         result = downloader.download_playlist_transcripts(
             playlist_url=url,
+            max_videos=max_videos,
             subtitles_langs=processed_languages,
         )
 

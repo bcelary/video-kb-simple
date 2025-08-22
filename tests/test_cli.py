@@ -74,7 +74,7 @@ def test_download_help():
     assert result.exit_code == 0
     assert "Download transcripts from a single video, playlist, or channel" in result.stdout
     assert "--output" in result.stdout
-    assert "--min-sleep" in result.stdout
+    assert "--max-videos" in result.stdout
     assert "--verbose" in result.stdout
 
 
@@ -91,7 +91,7 @@ def test_download_with_defaults(mock_downloader, sample_batch_result):
     assert "Playlist Download Summary" in result.stdout
 
     mock_downloader.download_playlist_transcripts.assert_called_once_with(
-        playlist_url=test_url, subtitles_langs=["en"]
+        playlist_url=test_url, max_videos=None, subtitles_langs=["en"]
     )
 
 
@@ -122,7 +122,7 @@ def test_download_verbose_mode(mock_downloader, sample_batch_result):
     assert result.exit_code == 0
     assert "Downloading transcripts from:" in result.stdout
     assert "Output directory:" in result.stdout
-    assert "Sleep interval:" in result.stdout
+    assert "Note: Using conservative rate limiting" in result.stdout
 
 
 def test_download_invalid_url(mock_downloader):
@@ -164,8 +164,8 @@ def test_download_permission_error(mock_downloader):
     assert "Error: Permission denied" in result.stdout
 
 
-def test_download_sleep_intervals(sample_batch_result):
-    """Test --min-sleep/--max-sleep parameters."""
+def test_download_max_videos(sample_batch_result):
+    """Test --max-videos parameter."""
     test_url = "https://www.youtube.com/playlist?list=test"
 
     with patch("video_kb_simple.cli.VideoDownloader") as mock_downloader_class:
@@ -174,15 +174,12 @@ def test_download_sleep_intervals(sample_batch_result):
         mock_instance.download_playlist_transcripts.return_value = sample_batch_result
 
         with patch("pathlib.Path.mkdir"):
-            result = runner.invoke(
-                app, ["download", test_url, "--min-sleep", "5", "--max-sleep", "20"]
-            )
+            result = runner.invoke(app, ["download", test_url, "--max-videos", "5"])
 
     assert result.exit_code == 0
-    # Check that VideoDownloader was initialized with correct sleep intervals
-    call_args = mock_downloader_class.call_args
-    assert call_args.kwargs["min_sleep_interval"] == 5
-    assert call_args.kwargs["max_sleep_interval"] == 20
+    # Check that download_playlist_transcripts was called with max_videos parameter
+    call_args = mock_instance.download_playlist_transcripts.call_args
+    assert call_args.kwargs["max_videos"] == 5
 
 
 def test_download_cookies(sample_batch_result):
