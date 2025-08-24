@@ -4,129 +4,93 @@ A modern CLI tool for bulk transcript extraction from YouTube playlists and chan
 
 ## Transcript Extraction Flow
 
-The tool processes playlists and channels for bulk transcript extraction with sophisticated bot detection avoidance:
+The tool uses the `SimpleDownloader` class to extract transcripts with a metadata-first approach and built-in rate limiting:
+
+### Main Processing Flow
 
 ```mermaid
 sequenceDiagram
     participant User
     participant CLI as CLI (Typer)
-    participant VD as VideoDownloader
+    participant SD as SimpleDownloader
     participant YT as yt-dlp API
-    participant FS as File System
-    participant YTB as YouTube
 
-    User->>CLI: video-kb download <playlist_url> --min-sleep 10
-    CLI->>VD: VideoDownloader(output_dir, verbose, min_sleep=10, max_sleep=30, browser_for_cookies)
-    VD->>VD: _validate_dependencies()
-    Note over VD: Check yt-dlp, ffmpeg, ffprobe availability
+    User->>CLI: video-kb download <url> --lang "en,es"
+    CLI->>SD: SimpleDownloader(output_dir, verbose, browser_cookies)
+    CLI->>SD: download_transcripts(url, max_videos, langs)
 
-    CLI->>VD: download_playlist_transcripts(url, subtitles_langs)
+    SD->>SD: normalize_playlist_url(url)
+    Note over SD: Returns (normalized_url, playlist_type)
 
-    Note over VD: Step 1: URL normalization
-    VD->>VD: _normalize_playlist_url(url)
-    Note over VD: @channel → @channel/videos<br/>Determine playlist_type (videos/shorts/live/playlist)
+    Note over SD: Route based on playlist_type
 
-    Note over VD: Step 1: Get URLs only (minimal API calls)
-    VD->>VD: _extract_playlist_info(normalized_url)
-    VD->>YT: YoutubeDL(extract_flat=True, cookies, sleep_intervals).extract_info(url)
-    YT->>YTB: Request playlist metadata + video entry URLs only
-    YTB->>YT: PlaylistInfo + list of video URLs (minimal data)
-    YT->>VD: PlaylistInfo, video_urls[]
+    alt playlist_type == SINGLE_VIDEO
+        SD->>SD: _download_video_transcripts(url, langs)
+        SD->>YT: YoutubeDL.extract_info(url, download=True)
+        Note right of YT: writeinfojson=True<br/>writesubtitles=True<br/>skip_download=True
+        YT-->>SD: Video info + downloaded files
+        SD->>SD: _scan_and_rename_files(video_id, title)
+        SD->>SD: _wrap_single_video_result(video_result, url, start_time)
+    else playlist/channel
+        SD->>SD: _extract_playlist_details(normalized_url, playlist_type)
+        SD->>YT: YoutubeDL.extract_info(url, extract_flat=True)
+        YT-->>SD: Playlist info with video_urls[]
+        SD->>SD: _download_playlist_transcripts(playlist_details, max_videos, langs)
 
-    Note over VD: Step 2: Process each video individually with rate limiting
-
-    loop For each video URL
-        Note over VD: Random delay: min_sleep to max_sleep seconds
-        VD->>VD: sleep(random(min_sleep, max_sleep))
-
-        alt Every 5 videos
-            Note over VD: Extended break: 60-120 seconds<br/>to avoid bot detection
-            VD->>VD: sleep(random(60, 120))
-        end
-
-
-        Note over VD: Step 2: Download individual video transcript
-        VD->>VD: _download_video_files(video_url, subtitles_langs)
-
-        Note over VD: Create temporary directory for isolated processing
-        VD->>FS: tempfile.mkdtemp(prefix="video_kb_", dir=output_dir)
-
-        Note over VD: Configure yt-dlp output templates with ISO date prefix
-        Note over VD: subtitle_template: YYYY-MM-DD_videoId.lang.ext<br/>metadata_template: YYYY-MM-DD_videoId.json
-
-        loop Retry attempts (max 3)
-            alt Retry attempt > 0
-                Note over VD: Exponential backoff delay
-                VD->>VD: sleep(base_delay * 2^(attempt-1))
-            end
-
-            alt Final attempt
-                Note over VD: Enable browser impersonation (safari)
-            end
-
-            VD->>YT: YoutubeDL(writesubtitles=True, writeautomaticsub=True,<br/>writeinfojson=True, skip_download=True,<br/>subtitleslangs=langs, outtmpl=templates)
-            YT->>YTB: Request subtitle + metadata download
-
-            alt Success
-                YTB->>YT: Subtitle files + JSON metadata
-                YT->>FS: Write to temp directory with ISO date prefix
-                Note over VD: Move files from temp to final location atomically
-                VD->>FS: temp_file.rename(output_dir / final_name)
-                Note over VD: ✅ successful_downloads++<br/>Break retry loop
-            else Rate Limited (429, "too many requests", "rate limit")
-                YTB->>YT: HTTP 429 / Rate limit error
-                YT->>VD: Rate limit exception
-                alt Not final attempt
-                    Note over VD: Continue retry loop with backoff
-                else Final attempt
-                    Note over VD: ❌ failed_downloads++<br/>Raise exception
-                end
-            else HTTP 403 / Access denied
-                YTB->>YT: HTTP 403 error
-                YT->>VD: Access denied exception
-                alt Not final attempt
-                    Note over VD: Continue retry loop
-                else Final attempt
-                    Note over VD: ❌ failed_downloads++<br/>Raise exception
-                end
-            else Other errors
-                YTB->>YT: Network/other error
-                YT->>VD: Exception
-                Note over VD: ❌ failed_downloads++<br/>Raise exception immediately
-            end
-        end
-
-        Note over VD: Cleanup: Remove temp directory
-        VD->>FS: shutil.rmtree(temp_dir, ignore_errors=True)
-
-        alt Global rate limit detected in playlist loop
-            Note over VD: Extended delay: 300-600 seconds
-            VD->>VD: sleep(random(300, 600))
+        loop For each video_url in playlist
+            SD->>SD: _download_video_transcripts(video_url, langs)
+            SD->>YT: YoutubeDL.extract_info(video_url, download=True)
+            YT-->>SD: Video info + downloaded files
+            SD->>SD: _scan_and_rename_files(video_id, title)
         end
     end
 
-    VD->>CLI: BatchResult(playlist_info, total_videos, successful_downloads,<br/>failed_downloads, skipped_videos, downloaded_files,<br/>errors, processing_time)
-    CLI->>User: Rich summary table + file listing
-
+    SD->>CLI: PlaylistResult(playlist_details, video_results, stats, errors)
+    CLI->>User: Rich terminal output with results
 ```
 
-### Playlist/Channel Download Bot Avoidance Features
+### Current Implementation Features
 
-1. **Two-Step API Optimization**: Step 1: Extract playlist URLs only (`extract_flat=True`), Step 2: Individual video processing
-2. **Smart URL Normalization**: Auto-converts `@channel` to `@channel/videos`, detects playlist types
-3. **Individual Video Processing**: Each video gets separate metadata + transcript calls for reliability
-4. **Conservative Rate Limiting**: Configurable min/max sleep intervals (default 10-30s) between videos
-5. **Extended Breaks**: 60-120 second pauses every 5 videos to avoid detection patterns
-6. **Aggressive Rate Limit Backoff**: 300-600 second delays (5-10 minutes) when hitting HTTP 429
-7. **Atomic File Operations**: Thread-safe file writes ensuring data integrity
-8. **Browser Cookie Support**: `--cookies-from firefox` for authenticated access
-9. **Safe Error Handling**: Continue processing remaining videos even if individual downloads fail
+1. **Metadata-First Processing**: Downloads video metadata JSON and subtitles in a single yt-dlp call
+2. **Smart File Naming**: Automatically renames files with slugified video titles for readability
+3. **Built-in Rate Limiting**: Conservative delays to avoid bot detection:
+   - 2s between metadata requests
+   - 10s between subtitle downloads
+   - 3-30s between video processing
+   - 500KB/s bandwidth limit
+4. **Error Isolation**: Individual video failures don't stop playlist processing
+5. **URL Normalization**: Auto-converts `@channel` to `@channel/videos` format
+6. **Browser Cookie Support**: Use `--cookies-from firefox/chrome` for authenticated access
+
+### Future Planned Features
+
+Advanced transcript processing capabilities are planned for future releases:
+
+#### Advanced Transcript Processing (Planned)
+1. **Smart Subtitle Classification**: Automatically detect manual vs automatic captions, original vs translated subtitles
+2. **Intelligent Language Selection**: Include source languages when downloading auto-translated subtitles (e.g., requesting Polish auto-translated from English automatically includes English source)
+3. **Advanced File Naming**: Classified naming convention that identifies subtitle type and source:
+   - `video.manual-orig.en.vtt` - Human-created subtitles
+   - `video.auto-orig.en.vtt` - Original automatic captions
+   - `video.auto-trans-en.pl.vtt` - Auto-translated captions (Polish from English)
+4. **Language Availability Filtering**: Only download languages that actually exist for each video, preventing failed requests
+
+#### Enhanced Reliability Features (Planned)
+- **Retry logic**: 3 attempts with exponential backoff (30s → 60s → 120s)
+- **Extended breaks**: 60-120s pauses every 5 videos to break patterns
+- **Impersonation fallback**: Browser impersonation only on final retry attempt
+- **Rate limit backoff**: 300-600s delays when receiving HTTP 429 responses
+
+These planned features follow guidelines from the [yt-dlp community](https://github.com/yt-dlp/yt-dlp) for avoiding detection while maintaining reasonable download speeds.
 
 ## Features
 
 - 🎥 Bulk transcript extraction from YouTube playlists and channels
+- 🧠 **Smart subtitle analysis**: Metadata-first processing to understand subtitle relationships and types
+- 📝 **Intelligent classification**: Auto-detects manual vs automatic subtitles, original vs translated content
+- 🎯 **Optimized downloads**: Only requests languages that actually exist, includes source languages for translations
+- 📂 **Advanced file naming**: Classified filenames that identify subtitle type (`manual-orig`, `auto-trans-en`, etc.)
 - 📺 Smart URL handling: auto-converts channels to optimal extraction format
-- 📝 High-quality transcript files with ISO date prefixes and slugified titles
 - ⚡ Direct yt-dlp Python API integration (no external binary required)
 - 🛡️ Conservative rate limiting with randomized delays and extended breaks
 - 🍪 Browser cookie support for authenticated access to private content
@@ -203,8 +167,6 @@ Arguments:
 
 Options:
   --output        -o      PATH     Output directory for transcripts [default: transcripts]
-  --min-sleep             INTEGER  Minimum seconds to sleep between downloads [default: 10]
-  --max-sleep             INTEGER  Maximum seconds to sleep between downloads [default: 30]
   --cookies-from          TEXT     Extract cookies from browser (firefox, chrome, safari, etc)
   --lang          -l      TEXT     Subtitle languages to download (e.g. 'en', 'es'). Can be
                                    specified multiple times.
@@ -239,8 +201,6 @@ video-kb download "https://www.youtube.com/@channelname/videos"
 
 # Conservative settings with extended delays
 video-kb download "https://www.youtube.com/@channelname" \
-  --min-sleep 15 \
-  --max-sleep 45 \
   --cookies-from firefox \
   --verbose
 
@@ -301,20 +261,20 @@ uv publish
 
 ```
 video-kb-simple/
-├── video_kb_simple/          # Main package
-│   ├── __init__.py           # Package initialization
-│   ├── __main__.py           # CLI entry point
-│   ├── cli.py                # Typer CLI interface
-│   └── downloader.py         # yt-dlp integration
-├── tests/                    # Test suite
+├── video_kb_simple/            # Main package
+│   ├── __init__.py             # Package initialization
+│   ├── __main__.py             # CLI entry point
+│   ├── cli.py                  # Typer CLI interface
+│   └── downloader.py           # yt-dlp integration
+├── tests/                      # Test suite
 │   ├── __init__.py
 │   ├── test_cli.py
 │   └── test_downloader.py
-├── pyproject.toml            # Project configuration
-├── README.md                 # This file
-├── .gitignore               # Git ignore rules
-├── .pre-commit-config.yaml  # Pre-commit hooks
-└── CLAUDE.md                # Development notes
+├── pyproject.toml              # Project configuration
+├── README.md                   # This file
+├── .gitignore                  # Git ignore rules
+├── .pre-commit-config.yaml     # Pre-commit hooks
+└── CLAUDE.md                   # Development notes
 ```
 
 ## Dependencies

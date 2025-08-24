@@ -10,7 +10,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from video_kb_simple import __version__
-from video_kb_simple.downloader import BatchResult, VideoDownloader
+from video_kb_simple.downloader import PlaylistResult, SimpleDownloader
 
 app = typer.Typer(
     name="video-kb",
@@ -86,17 +86,17 @@ def download(
         console.print(f"[green]Languages:[/green] {', '.join(processed_languages)}")
 
     try:
-        downloader = VideoDownloader(
+        downloader = SimpleDownloader(
             output_dir=output_dir,
             verbose=verbose,
             force_download=force_download,
             browser_for_cookies=browser_cookies,
         )
 
-        result = downloader.download_playlist_transcripts(
-            playlist_url=url,
+        result = downloader.download_transcripts(
+            url=url,
             max_videos=max_videos,
-            subtitles_langs=processed_languages,
+            langs=processed_languages,
         )
 
         # Display results
@@ -112,38 +112,50 @@ def download(
         raise typer.Exit(1) from None
 
 
-def _display_batch_results(result: BatchResult, console: Console) -> None:
-    """Display batch download results in a formatted table."""
+def _display_batch_results(result: PlaylistResult, console: Console) -> None:
+    """Display playlist download results in a formatted table."""
     # Create summary table
-    table = Table(title="Playlist Download Summary")
+    table = Table(title="Download Summary")
     table.add_column("Metric", style="cyan")
     table.add_column("Count", style="green")
 
-    table.add_row("Playlist", result.playlist_info.title)
-    table.add_row("Type", result.playlist_info.playlist_type)
-    table.add_row("Total videos found", str(result.total_videos))
+    if result.playlist_details:
+        table.add_row("Title", result.playlist_details.title or "Unknown")
+        table.add_row(
+            "Type",
+            result.playlist_details.playlist_type.value
+            if result.playlist_details.playlist_type
+            else "Unknown",
+        )
+
+    table.add_row("Total videos requested", str(result.total_requested))
     table.add_row("Successful downloads", f"✅ {result.successful_downloads}")
     table.add_row("Failed downloads", f"❌ {result.failed_downloads}")
-    table.add_row("Skipped (already downloaded)", f"⏭️ {result.skipped_videos}")
-    table.add_row("Processing time", f"{result.processing_time:.1f}s")
+    table.add_row("Processing time", f"{result.processing_time_seconds:.1f}s")
 
     console.print(table)
 
     # Show downloaded files
-    if result.downloaded_files:
+    all_files = []
+    for video_result in result.video_results:
+        if video_result.success:
+            for downloaded_file in video_result.downloaded_files:
+                all_files.append(downloaded_file.path)
+
+    if all_files:
         console.print(
-            f"\n[green]Downloaded {len(result.downloaded_files)} transcripts to:[/green] {result.downloaded_files[0].parent}"
+            f"\n[green]Downloaded {len(all_files)} files to:[/green] {all_files[0].parent}"
         )
 
-        if len(result.downloaded_files) <= 10:
+        if len(all_files) <= 10:
             # Show all files if 10 or fewer
-            for file_path in result.downloaded_files:
+            for file_path in all_files:
                 console.print(f"  📄 {file_path.name}")
         else:
             # Show first few and summarize
-            for file_path in result.downloaded_files[:3]:
+            for file_path in all_files[:3]:
                 console.print(f"  📄 {file_path.name}")
-            console.print(f"  ... and {len(result.downloaded_files) - 3} more files")
+            console.print(f"  ... and {len(all_files) - 3} more files")
 
     # Show errors if any
     if result.errors:
@@ -157,8 +169,8 @@ def _display_batch_results(result: BatchResult, console: Console) -> None:
     if result.successful_downloads > 0:
         success_panel = Panel(
             f"✅ Successfully downloaded transcripts from {result.successful_downloads} videos\n"
-            f"📁 Files saved to: [bold blue]{result.downloaded_files[0].parent if result.downloaded_files else 'N/A'}[/bold blue]",
-            title="Playlist Download Complete",
+            f"📁 Files saved to: [bold blue]{all_files[0].parent if all_files else 'N/A'}[/bold blue]",
+            title="Download Complete",
             style="green",
         )
         console.print(success_panel)
