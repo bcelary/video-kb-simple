@@ -1,5 +1,6 @@
 """Simplified video downloader and transcript extractor using yt-dlp."""
 
+import json
 import re
 import time
 from enum import Enum
@@ -18,7 +19,6 @@ YOUTUBE_VIDEO_URL_PATTERNS = [
 
 YOUTUBE_CHANNEL_URL_PATTERN = r"https?://(?:www\.)?youtube\.com/@[\w-]+/?$"
 
-# File processing constants
 DEFAULT_SUBTITLE_LANGUAGES = ["en"]
 SUBTITLE_EXTENSIONS = {".vtt", ".srt", ".ass"}
 METADATA_EXTENSION = ".json"
@@ -62,18 +62,10 @@ def normalize_languages(langs: list[str] | None) -> list[str]:
 
 
 def detect_file_type_and_language(file_path: Path) -> tuple[str, str | None]:
-    """Detect file type and language from file path.
-
-    Args:
-        file_path: Path to the file
-
-    Returns:
-        (file_type, language) tuple
-    """
+    """Detect file type and language from file path."""
     if file_path.suffix == METADATA_EXTENSION:
         return FILE_TYPE_METADATA, None
     elif file_path.suffix in SUBTITLE_EXTENSIONS:
-        # Extract language from yt-dlp filename - last part before extension
         parts = file_path.stem.split(".")
         language = parts[-1] if len(parts) >= 2 else "unknown"
         return FILE_TYPE_SUBTITLE, language
@@ -91,15 +83,10 @@ def extract_video_id_from_url(url: str) -> str | None:
 
 
 def normalize_playlist_url(url: str) -> tuple[str, PlaylistType]:
-    """Normalize URL for optimal playlist/channel processing.
-
-    Returns:
-        (normalized_url, playlist_type)
-    """
+    """Normalize URL for optimal playlist/channel processing."""
     normalized_url = url
     playlist_type = None
 
-    # If it's a channel URL without specific tab, default to /videos
     if re.match(YOUTUBE_CHANNEL_URL_PATTERN, url):
         normalized_url = url.rstrip("/") + "/videos"
         playlist_type = PlaylistType.CHANNEL_VIDEOS
@@ -197,12 +184,19 @@ class Logger:
 class SimpleDownloader:
     """Simplified video downloader that focuses on core functionality."""
 
-    # Rate limiting configuration to reduce YouTube API hits
     DEFAULT_SLEEP_REQUESTS = 2  # Sleep between metadata API requests
-    DEFAULT_SLEEP_SUBTITLES = 10  # Sleep between subtitle downloads (increased from 3)
-    DEFAULT_SLEEP_INTERVAL = 3  # Minimum sleep between downloads
-    DEFAULT_MAX_SLEEP_INTERVAL = 30  # Maximum sleep between downloads
+    DEFAULT_SLEEP_SUBTITLES = 35  # Sleep between subtitle downloads
+    DEFAULT_SLEEP_INTERVAL = 5  # Minimum sleep between downloads
+    DEFAULT_MAX_SLEEP_INTERVAL = 90  # Maximum sleep between downloads
     DEFAULT_RATE_LIMIT = 500000  # Download bandwidth limit (bytes/sec)
+    DEFAULT_RETRIES = 3  # Number of download retries
+    DEFAULT_EXTRACTOR_RETRIES = 5  # Number of extractor retries (increased for 429 handling)
+    DEFAULT_FILE_ACCESS_RETRIES = 3  # Number of file access retries
+    # Retry sleep function parameters
+    HTTP_RETRY_BASE = 2  # Base for exponential backoff (2^n)
+    HTTP_RETRY_MAX = 120  # Maximum sleep time for HTTP retries (seconds)
+    EXTRACTOR_RETRY_MULTIPLIER = 5  # Multiplier for linear extractor backoff (5*n)
+    EXTRACTOR_RETRY_MAX = 30  # Maximum sleep time for extractor retries (seconds)
     SOCKET_TIMEOUT = 30  # Network connection timeout
 
     def __init__(
@@ -228,15 +222,15 @@ class SimpleDownloader:
         self.browser_for_cookies = browser_for_cookies
         self.slug_max_length = slug_max_length
 
-        # Initialize logger with verbosity handling
         console = Console()
         self.logger = Logger(console, verbose)
-
-        # Ensure output directory exists
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def _create_ytdlp_options(self, **kwargs: Any) -> dict[str, Any]:
         """Create yt-dlp options dictionary with rate limiting and sensible defaults.
+
+        For complete yt-dlp options documentation, see:
+        https://github.com/yt-dlp/yt-dlp#usage-and-options
 
         Args:
             **kwargs: Additional options to override defaults
@@ -251,11 +245,22 @@ class SimpleDownloader:
             "max_sleep_interval": self.DEFAULT_MAX_SLEEP_INTERVAL,
             "socket_timeout": self.SOCKET_TIMEOUT,
             "ratelimit": self.DEFAULT_RATE_LIMIT,
+            "retries": self.DEFAULT_RETRIES,
+            "extractor_retries": self.DEFAULT_EXTRACTOR_RETRIES,
+            "file_access_retries": self.DEFAULT_FILE_ACCESS_RETRIES,
+            "retry_sleep_functions": {
+                "http": lambda n: min(
+                    self.HTTP_RETRY_BASE**n, self.HTTP_RETRY_MAX
+                ),  # Exponential backoff for HTTP errors
+                "extractor": lambda n: min(
+                    self.EXTRACTOR_RETRY_MULTIPLIER * n, self.EXTRACTOR_RETRY_MAX
+                ),  # Linear backoff for extractor errors
+                "file_access": lambda n: n,  # Simple linear backoff for file access
+            },
             "quiet": not self.verbose,
             "no_warnings": not self.verbose,
         }
 
-        # Add browser cookies if specified
         if self.browser_for_cookies:
             base_options["cookiesfrombrowser"] = (self.browser_for_cookies,)
 
@@ -293,22 +298,14 @@ class SimpleDownloader:
         self.logger.info(f"Max videos: {max_videos or 'unlimited'}")
         self.logger.info(f"Languages: {langs}")
 
-        # Normalize URL and determine type (can raise URLNormalizationError)
         normalized_url, playlist_type = normalize_playlist_url(url)
         self.logger.info(f"Normalized URL: {normalized_url}")
         self.logger.info(f"Detected type: {playlist_type.value}")
-
-        # Route to appropriate handler based on URL type
         if playlist_type == PlaylistType.SINGLE_VIDEO:
-            # Handle single video as a playlist of one
             video_result = self._download_video_transcripts(url, langs)
             playlist_result = self._wrap_single_video_result(video_result, url, start_time)
-
         else:
-            # Handle playlist/channel - extract details first (can raise PlaylistExtractionError)
             playlist_details = self._extract_playlist_details(normalized_url, playlist_type)
-
-            # Then download from the playlist (errors go into result, not raised)
             playlist_result = self._download_playlist_transcripts(
                 playlist_details, max_videos, langs
             )
@@ -334,7 +331,6 @@ class SimpleDownloader:
         Returns:
             PlaylistResult with single video wrapped as playlist
         """
-        # Create playlist details for single video
         playlist_details = PlaylistDetails(
             playlist_id=video_result.video_id,
             playlist_type=PlaylistType.SINGLE_VIDEO,
@@ -344,7 +340,6 @@ class SimpleDownloader:
             video_urls=[url],
         )
 
-        # Create playlist result
         playlist_result = PlaylistResult(
             playlist_details=playlist_details,
             video_results=[video_result],
@@ -354,72 +349,136 @@ class SimpleDownloader:
             processing_time_seconds=time.time() - start_time,
         )
 
-        # Add error if video failed
         if not video_result.success:
             playlist_result.errors.append(video_result.error_message or "Unknown error")
 
         return playlist_result
 
-    def _scan_and_rename_files(self, video_id: str, title: str) -> list[DownloadedFile]:
-        """Scan downloaded files and rename them to include slugified title.
+    def _scan_downloaded_files(self, video_id: str) -> list[DownloadedFile]:
+        """Scan for files matching video_id, return as-is without renaming.
 
         Args:
             video_id: YouTube video ID
-            title: Video title to slugify
 
         Returns:
-            List of DownloadedFile objects with renamed files
+            List of DownloadedFile objects with current file paths
         """
         downloaded_files: list[DownloadedFile] = []
 
         if not self.output_dir.exists():
             return downloaded_files
 
-        # Create slugified title
-        slug = slugify(title, max_length=self.slug_max_length) if title else "unknown"
-
-        # Look for files that start with the video ID
-        for file_path in self.output_dir.glob(f"{video_id}*"):
+        for file_path in self.output_dir.glob(f"*{video_id}*"):
             if file_path.is_file():
-                # Determine file type and language
                 file_type, language = detect_file_type_and_language(file_path)
 
-                # Simple approach: just insert slug after video_id, preserve everything else
-                original_name = file_path.name
-
-                # This should always be true since we found it with glob(f"{video_id}*")
-                assert original_name.startswith(video_id), (
-                    f"File {original_name} should start with {video_id}"
-                )
-
-                # Replace: videoId.rest -> videoId_slug.rest
-                rest_of_name = original_name[len(video_id) :]  # Everything after video_id
-                new_name = f"{video_id}_{slug}{rest_of_name}"
-
-                # Rename the file
-                new_path = self.output_dir / new_name
                 try:
-                    file_path.rename(new_path)
-                    if self.verbose:
-                        self.logger.info(f"Renamed: {file_path.name} -> {new_name}")
-                    final_path = new_path
-                except OSError as e:
-                    if self.verbose:
-                        self.logger.warning(f"Failed to rename {file_path.name}: {e}")
-                    final_path = file_path
-
-                # Get file size
-                try:
-                    size_bytes = final_path.stat().st_size
+                    size_bytes = file_path.stat().st_size
                 except OSError:
                     size_bytes = None
 
                 downloaded_file = DownloadedFile(
-                    path=final_path, file_type=file_type, language=language, size_bytes=size_bytes
+                    path=file_path, file_type=file_type, language=language, size_bytes=size_bytes
                 )
                 downloaded_files.append(downloaded_file)
 
         return downloaded_files
+
+    def _rename_files_with_slug(
+        self, files: list[DownloadedFile], video_id: str, slug: str
+    ) -> list[DownloadedFile]:
+        """Rename files to include slug, return updated DownloadedFile objects.
+
+        Args:
+            files: List of DownloadedFile objects to rename
+            video_id: YouTube video ID
+            slug: Slugified title to include in filename
+
+        Returns:
+            List of DownloadedFile objects with updated paths
+        """
+        renamed_files: list[DownloadedFile] = []
+
+        for downloaded_file in files:
+            file_path = downloaded_file.path
+            original_name = file_path.name
+
+            if video_id not in original_name:
+                self.logger.warning(
+                    f"File {original_name} doesn't contain {video_id}, skipping rename"
+                )
+                renamed_files.append(downloaded_file)
+                continue
+
+            video_id_pos = original_name.find(video_id)
+            before_video_id = original_name[:video_id_pos]
+            video_id_part = video_id
+            after_video_id = original_name[video_id_pos + len(video_id) :]
+
+            new_name = f"{before_video_id}{video_id_part}_{slug}{after_video_id}"
+            new_path = self.output_dir / new_name
+
+            try:
+                file_path.rename(new_path)
+                self.logger.info(f"Renamed: {file_path.name} -> {new_name}")
+                final_path = new_path
+            except OSError as e:
+                self.logger.warning(f"Failed to rename {file_path.name}: {e}")
+                final_path = file_path
+
+            updated_file = DownloadedFile(
+                path=final_path,
+                file_type=downloaded_file.file_type,
+                language=downloaded_file.language,
+                size_bytes=downloaded_file.size_bytes,
+            )
+            renamed_files.append(updated_file)
+
+        return renamed_files
+
+    def _check_existing_download(self, video_id: str) -> VideoResult | None:
+        """Check if video already downloaded with metadata, return VideoResult if found.
+
+        Args:
+            video_id: YouTube video ID to check
+
+        Returns:
+            VideoResult if metadata JSON exists and can be loaded, None otherwise
+        """
+        existing_files = self._scan_downloaded_files(video_id)
+
+        metadata_file = None
+        for file in existing_files:
+            if file.file_type == FILE_TYPE_METADATA:
+                metadata_file = file
+                break
+
+        if not metadata_file:
+            return None
+
+        try:
+            with open(metadata_file.path, encoding="utf-8") as f:
+                metadata = json.load(f)
+
+            title = metadata.get("title", "Unknown Title")
+            upload_date = metadata.get("upload_date")
+            actual_video_id = metadata.get("id", video_id)
+            url = metadata.get("webpage_url") or metadata.get("original_url")
+
+            self.logger.info(f"Found existing download for: {title}")
+
+            return VideoResult(
+                video_id=actual_video_id,
+                title=title,
+                url=url,
+                upload_date=upload_date,
+                success=True,
+                downloaded_files=existing_files,
+            )
+
+        except (json.JSONDecodeError, OSError, KeyError) as e:
+            self.logger.warning(f"Failed to load metadata from {metadata_file.path}: {e}")
+            return None
 
     def _extract_playlist_details(
         self, normalized_url: str, playlist_type: PlaylistType
@@ -453,12 +512,10 @@ class SimpleDownloader:
                     f"Could not extract playlist information from: {normalized_url}"
                 )
 
-            # Extract playlist metadata
             playlist_id = info.get("id")
             title = info.get("title", "Unknown Playlist")
             uploader = info.get("uploader") or info.get("channel")
 
-            # Extract video URLs from entries
             video_urls = []
             entries = info.get("entries", [])
 
@@ -466,7 +523,6 @@ class SimpleDownloader:
                 if entry and entry.get("url"):
                     video_urls.append(entry["url"])
                 elif entry and entry.get("id"):
-                    # Construct URL from video ID if direct URL not available
                     video_urls.append(f"https://www.youtube.com/watch?v={entry['id']}")
 
             self.logger.success(f"Found {len(video_urls)} videos in playlist: {title}")
@@ -504,14 +560,30 @@ class SimpleDownloader:
         """
         subtitles_langs = normalize_languages(subtitles_langs)
 
-        # Extract video ID for tracking
         video_id = extract_video_id_from_url(video_url)
+        if not video_id:
+            error_message = f"Could not extract video ID from URL: {video_url}"
+            self.logger.error(error_message)
+            return VideoResult(
+                video_id=None,
+                url=video_url,
+                success=False,
+                error_message=error_message,
+            )
 
         self.logger.info(f"Downloading transcripts for video: {video_id}")
         self.logger.info(f"Languages requested: {subtitles_langs}")
 
+        if not self.force_download:
+            existing_result = self._check_existing_download(video_id)
+            if existing_result:
+                self.logger.info(
+                    "Skipping download, files already exist (use --force to re-download)"
+                )
+                return existing_result
+
         try:
-            # Step 1+2: Download metadata and requested subtitles in single yt-dlp call
+            # Step 1: Download metadata (JSON info file)
             self.logger.info("Downloading metadata and requested subtitles...")
 
             combined_opts = self._create_ytdlp_options(
@@ -521,13 +593,19 @@ class SimpleDownloader:
                 skip_download=True,
                 subtitleslangs=subtitles_langs,
                 outtmpl={
-                    "infojson": str(self.output_dir / "%(id)s.%(ext)s"),
-                    "subtitle": str(self.output_dir / "%(id)s.%(subtitle_lang)s.%(ext)s"),
+                    "infojson": str(
+                        self.output_dir
+                        / "%(upload_date>%Y-%m-%d,release_date>%Y-%m-%d,NA)s_%(id)s.%(ext)s"
+                    ),
+                    "subtitle": str(
+                        self.output_dir
+                        / "%(upload_date>%Y-%m-%d,release_date>%Y-%m-%d,NA)s_%(id)s.%(subtitle_lang)s.%(ext)s"
+                    ),
                 },
             )
 
             with yt_dlp.YoutubeDL(combined_opts) as ydl:
-                info = ydl.extract_info(video_url, download=True)  # Extract info AND download files
+                info = ydl.extract_info(video_url, download=True)
 
             if not info:
                 return VideoResult(
@@ -537,7 +615,7 @@ class SimpleDownloader:
                     error_message="Could not extract video information",
                 )
 
-            # Extract video metadata
+            # Step 2: Process downloaded metadata and subtitles
             title = info.get("title", "Unknown Title")
             upload_date = info.get("upload_date")
             actual_video_id = info.get("id", video_id)
@@ -549,8 +627,10 @@ class SimpleDownloader:
             # - Determine if source languages should be added for completeness
             # - Download additional subtitles if needed with second yt-dlp call
 
-            # Scan output directory for files created by this download and rename them
-            downloaded_files = self._scan_and_rename_files(actual_video_id, title)
+            downloaded_files = self._scan_downloaded_files(actual_video_id)
+
+            slug = slugify(title, max_length=self.slug_max_length) if title else "unknown"
+            downloaded_files = self._rename_files_with_slug(downloaded_files, actual_video_id, slug)
 
             self.logger.success(f"Successfully downloaded transcripts for: {title}")
 
@@ -597,7 +677,6 @@ class SimpleDownloader:
         self.logger.info(f"Languages: {subtitles_langs}")
         self.logger.info(f"Output directory: {self.output_dir}")
 
-        # Determine videos to process
         videos_to_process = playlist.video_urls
         if max_videos and max_videos > 0:
             videos_to_process = videos_to_process[:max_videos]
@@ -605,22 +684,18 @@ class SimpleDownloader:
         total_videos = len(videos_to_process)
         self.logger.info(f"Processing {total_videos} videos...")
 
-        # Initialize result tracking
         video_results = []
         successful_downloads = 0
         failed_downloads = 0
         errors = []
 
-        # Process each video
         for i, video_url in enumerate(videos_to_process, 1):
             self.logger.info(f"Processing video {i}/{total_videos}: {video_url}")
 
             try:
-                # Download transcripts for this video
                 video_result = self._download_video_transcripts(video_url, subtitles_langs)
                 video_results.append(video_result)
 
-                # Update counters
                 if video_result.success:
                     successful_downloads += 1
                 else:
@@ -629,14 +704,14 @@ class SimpleDownloader:
                         errors.append(f"Video {i}: {video_result.error_message}")
 
             except Exception as e:
-                # Handle unexpected errors during individual video processing
                 error_message = f"Unexpected error processing video {i}: {e}"
                 self.logger.error(error_message)
                 errors.append(error_message)
                 failed_downloads += 1
 
-                # Create failed result for this video
-                video_result = VideoResult(url=video_url, success=False, error_message=str(e))
+                video_result = VideoResult(
+                    url=video_url, success=False, error_message=error_message
+                )
                 video_results.append(video_result)
 
         self.logger.success(
