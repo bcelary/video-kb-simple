@@ -40,12 +40,6 @@ class URLNormalizationError(DownloadError):
     pass
 
 
-class PlaylistExtractionError(DownloadError):
-    """Raised when playlist information cannot be extracted from a valid URL."""
-
-    pass
-
-
 class PlaylistType(Enum):
     """Enumeration of supported playlist types."""
 
@@ -56,9 +50,11 @@ class PlaylistType(Enum):
     SINGLE_VIDEO = "single_video"
 
 
-def normalize_languages(langs: list[str] | None) -> list[str]:
+def normalize_languages(subtitle_languages: list[str] | None) -> list[str]:
     """Normalize language list, providing defaults if None."""
-    return langs if langs is not None else DEFAULT_SUBTITLE_LANGUAGES.copy()
+    return (
+        subtitle_languages if subtitle_languages is not None else DEFAULT_SUBTITLE_LANGUAGES.copy()
+    )
 
 
 def detect_file_type_and_language(file_path: Path) -> tuple[str, str | None]:
@@ -139,6 +135,7 @@ class VideoResult(BaseModel):
     upload_date: str | None = None
     success: bool = False
     error_message: str | None = None
+    warnings: list[str] = Field(default_factory=list)  # Captured yt-dlp warnings
     downloaded_files: list[DownloadedFile] = Field(default_factory=list)
 
 
@@ -179,6 +176,51 @@ class Logger:
         """Log warning message with yellow styling if verbose is enabled."""
         if self.verbose:
             self.console.print(f"[yellow]{message}[/yellow]")
+
+
+class YTDLPLogger:
+    """Custom logger for yt-dlp to capture warnings and errors."""
+
+    def __init__(self, console_logger: Logger):
+        self.console_logger = console_logger
+        self.captured_warnings: list[str] = []
+        self.captured_errors: list[str] = []
+
+    def debug(self, msg: str) -> None:
+        """Handle debug messages."""
+        pass  # Ignore debug messages
+
+    def info(self, msg: str) -> None:
+        """Handle info messages."""
+        pass  # Ignore info messages
+
+    def warning(self, msg: str) -> None:
+        """Handle warning messages - capture them for reporting."""
+        # Clean up the message
+        clean_msg = msg.strip()
+        if clean_msg:
+            self.captured_warnings.append(clean_msg)
+            self.console_logger.warning(clean_msg)
+
+    def error(self, msg: str) -> None:
+        """Handle error messages - capture them for reporting."""
+        # Clean up the message
+        clean_msg = msg.strip()
+        if clean_msg:
+            self.captured_errors.append(clean_msg)
+            self.console_logger.error(clean_msg)
+
+    def get_warnings(self) -> list[str]:
+        """Get all captured warnings."""
+        return self.captured_warnings.copy()
+
+    def get_errors(self) -> list[str]:
+        """Get all captured errors."""
+        return self.captured_errors.copy()
+
+    def has_warnings_or_errors(self) -> bool:
+        """Check if any warnings or errors were captured."""
+        return bool(self.captured_warnings or self.captured_errors)
 
 
 class SimpleDownloader:
@@ -269,7 +311,7 @@ class SimpleDownloader:
         return base_options
 
     def download_transcripts(
-        self, url: str, max_videos: int | None = None, langs: list[str] | None = None
+        self, url: str, max_videos: int | None = None, subtitle_languages: list[str] | None = None
     ) -> PlaylistResult:
         """Main entry point for downloading transcripts from any YouTube URL.
 
@@ -277,39 +319,52 @@ class SimpleDownloader:
         a single video or playlist/channel, and delegates to the appropriate handler.
 
         Individual download failures are captured in the result object, not raised as exceptions.
-        Only fundamental setup issues (invalid URL, network unavailable) raise exceptions.
+        Only fundamental setup issues (invalid URL) raise exceptions. All other failures
+        (network issues, playlist extraction failures, video download failures) are captured
+        in the returned PlaylistResult object.
 
         Args:
             url: YouTube URL (video, playlist, or channel)
             max_videos: Maximum number of videos to process (None = all)
-            langs: List of language codes for subtitles (None = ['en'])
+            subtitle_languages: List of language codes for subtitles (None = ['en'])
 
         Returns:
             PlaylistResult with detailed information about downloads and any errors
 
         Raises:
             URLNormalizationError: If URL cannot be parsed or normalized
-            PlaylistExtractionError: If playlist info cannot be extracted (connection/auth issues)
         """
         start_time = time.time()
-        langs = normalize_languages(langs)
+        subtitle_languages = normalize_languages(subtitle_languages)
 
         self.logger.info(f"Starting download from: {url}")
         self.logger.info(f"Max videos: {max_videos or 'unlimited'}")
-        self.logger.info(f"Languages: {langs}")
+        self.logger.info(f"Languages: {subtitle_languages}")
 
         normalized_url, playlist_type = normalize_playlist_url(url)
         self.logger.info(f"Normalized URL: {normalized_url}")
         self.logger.info(f"Detected type: {playlist_type.value}")
         if playlist_type == PlaylistType.SINGLE_VIDEO:
-            video_result = self._download_video_transcripts(url, langs)
+            video_result = self._download_video_transcripts(url, subtitle_languages)
             playlist_result = self._wrap_single_video_result(video_result, url, start_time)
         else:
             playlist_details = self._extract_playlist_details(normalized_url, playlist_type)
-            playlist_result = self._download_playlist_transcripts(
-                playlist_details, max_videos, langs
-            )
-            playlist_result.processing_time_seconds = time.time() - start_time
+            if playlist_details is None:
+                # Failed to extract playlist details, create a failed result
+                playlist_result = PlaylistResult(
+                    playlist_details=None,
+                    video_results=[],
+                    total_requested=0,
+                    successful_downloads=0,
+                    failed_downloads=0,
+                    processing_time_seconds=time.time() - start_time,
+                    errors=["Failed to extract playlist details"],
+                )
+            else:
+                playlist_result = self._download_playlist_transcripts(
+                    playlist_details, max_videos, subtitle_languages
+                )
+                playlist_result.processing_time_seconds = time.time() - start_time
 
         self.logger.success(f"Download completed in {playlist_result.processing_time_seconds:.1f}s")
         self.logger.success(
@@ -355,34 +410,27 @@ class SimpleDownloader:
         return playlist_result
 
     def _scan_downloaded_files(self, video_id: str) -> list[DownloadedFile]:
-        """Scan for files matching video_id, return as-is without renaming.
-
-        Args:
-            video_id: YouTube video ID
-
-        Returns:
-            List of DownloadedFile objects with current file paths
-        """
-        downloaded_files: list[DownloadedFile] = []
-
+        """Scan for files matching video_id with optimized globbing."""
         if not self.output_dir.exists():
-            return downloaded_files
+            return []
 
-        for file_path in self.output_dir.glob(f"*{video_id}*"):
-            if file_path.is_file():
-                file_type, language = detect_file_type_and_language(file_path)
+        # Use more specific pattern to reduce filesystem calls
+        pattern = f"*{video_id}*"
+        files = list(self.output_dir.glob(pattern))
 
-                try:
-                    size_bytes = file_path.stat().st_size
-                except OSError:
-                    size_bytes = None
+        return [self._create_downloaded_file(f) for f in files if f.is_file()]
 
-                downloaded_file = DownloadedFile(
-                    path=file_path, file_type=file_type, language=language, size_bytes=size_bytes
-                )
-                downloaded_files.append(downloaded_file)
+    def _create_downloaded_file(self, file_path: Path) -> DownloadedFile:
+        """Create DownloadedFile object from path."""
+        file_type, language = detect_file_type_and_language(file_path)
+        try:
+            size_bytes = file_path.stat().st_size
+        except OSError:
+            size_bytes = None
 
-        return downloaded_files
+        return DownloadedFile(
+            path=file_path, file_type=file_type, language=language, size_bytes=size_bytes
+        )
 
     def _rename_files_with_slug(
         self, files: list[DownloadedFile], video_id: str, slug: str
@@ -480,12 +528,11 @@ class SimpleDownloader:
 
             self.logger.info(f"Found existing download for: {title}")
 
-            return VideoResult(
+            return self._create_success_result(
                 video_id=actual_video_id,
                 title=title,
-                url=url,
+                video_url=url,
                 upload_date=upload_date,
-                success=True,
                 downloaded_files=existing_files,
             )
 
@@ -510,7 +557,7 @@ class SimpleDownloader:
 
     def _extract_playlist_details(
         self, normalized_url: str, playlist_type: PlaylistType
-    ) -> PlaylistDetails:
+    ) -> PlaylistDetails | None:
         """Extract basic playlist information without downloading videos.
 
         Args:
@@ -518,36 +565,32 @@ class SimpleDownloader:
             playlist_type: Type of playlist detected
 
         Returns:
-            PlaylistDetails with basic info and video URLs
-
-        Raises:
-            PlaylistExtractionError: If playlist info cannot be extracted
+            PlaylistDetails with basic info and video URLs, or None if extraction failed
         """
         self.logger.info(f"Extracting playlist details from: {normalized_url}")
 
         try:
             # Use extract_flat=True to get only playlist metadata and video URLs
-            extract_opts = self._create_ytdlp_options(
+            extraction_options = self._create_ytdlp_options(
                 extract_flat=True,
                 quiet=True,  # Minimize output noise during extraction
             )
 
-            with yt_dlp.YoutubeDL(extract_opts) as ydl:
-                info = ydl.extract_info(normalized_url, download=False)
+            with yt_dlp.YoutubeDL(extraction_options) as ydl:
+                video_info = ydl.extract_info(normalized_url, download=False)
 
-            if not info:
-                raise PlaylistExtractionError(
-                    f"Could not extract playlist information from: {normalized_url}"
-                )
+            if not video_info:
+                self.logger.error(f"Could not extract playlist information from: {normalized_url}")
+                return None
 
-            playlist_id = info.get("id")
-            title = info.get("title", "Unknown Playlist")
-            uploader = info.get("uploader") or info.get("channel")
+            playlist_id = video_info.get("id")
+            title = video_info.get("title", "Unknown Playlist")
+            uploader = video_info.get("uploader") or video_info.get("channel")
 
             video_urls = []
-            entries = info.get("entries", [])
+            video_entries = video_info.get("entries", [])
 
-            for entry in entries:
+            for entry in video_entries:
                 if entry and entry.get("url"):
                     video_urls.append(entry["url"])
                 elif entry and entry.get("id"):
@@ -565,158 +608,279 @@ class SimpleDownloader:
             )
 
         except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError) as e:
-            raise PlaylistExtractionError(f"Failed to extract playlist details: {e}") from e
+            self.logger.error(f"Failed to extract playlist details: {e}")
+            return None
         except Exception as e:
-            raise PlaylistExtractionError(f"Unexpected error extracting playlist: {e}") from e
+            self.logger.error(f"Unexpected error extracting playlist: {e}")
+            return None
+
+    def _create_failed_result(
+        self,
+        video_url: str,
+        error_message: str,
+        video_id: str | None = None,
+        title: str | None = None,
+        downloaded_files: list[DownloadedFile] | None = None,
+        warnings: list[str] | None = None,
+    ) -> VideoResult:
+        """Create a failed VideoResult with the given error message.
+
+        Args:
+            video_url: The video URL that failed
+            error_message: The error message to include
+            video_id: Optional video ID if available
+            title: Optional video title if available
+            downloaded_files: Optional list of downloaded files
+            warnings: Optional list of warnings captured during download
+
+        Returns:
+            VideoResult with success=False and the error message
+        """
+        self.logger.error(error_message)
+        return VideoResult(
+            video_id=video_id,
+            title=title,
+            url=video_url,
+            success=False,
+            error_message=error_message,
+            warnings=warnings or [],
+            downloaded_files=downloaded_files or [],
+        )
+
+    def _create_success_result(
+        self,
+        video_id: str,
+        title: str,
+        video_url: str,
+        upload_date: str | None = None,
+        downloaded_files: list[DownloadedFile] | None = None,
+        warnings: list[str] | None = None,
+    ) -> VideoResult:
+        """Create a successful VideoResult with the given information.
+
+        Args:
+            video_id: The video ID
+            title: The video title
+            video_url: The video URL
+            upload_date: Optional upload date
+            downloaded_files: Optional list of downloaded files
+            warnings: Optional list of warnings captured during download
+
+        Returns:
+            VideoResult with success=True
+        """
+        return VideoResult(
+            video_id=video_id,
+            title=title,
+            url=video_url,
+            upload_date=upload_date,
+            success=True,
+            warnings=warnings or [],
+            downloaded_files=downloaded_files or [],
+        )
+
+    def _handle_existing_download(
+        self, existing_result: VideoResult, subtitle_languages: list[str]
+    ) -> tuple[VideoResult | None, list[str]]:
+        """Handle logic when existing download is found.
+
+        Args:
+            existing_result: The existing VideoResult from previous download
+            subtitle_languages: List of requested subtitle languages
+
+        Returns:
+            Tuple of (VideoResult or None, updated subtitle_languages list)
+            - If VideoResult is returned, use it directly (no download needed)
+            - If None is returned, proceed with download using the updated subtitle_languages
+        """
+        # Check which languages are already downloaded
+        downloaded_languages = self._get_downloaded_languages(existing_result.downloaded_files)
+        remaining_languages = [
+            lang for lang in subtitle_languages if lang not in downloaded_languages
+        ]
+
+        if not remaining_languages:
+            # All requested languages are already downloaded
+            self.logger.info(
+                f"Skipping download, all requested languages {subtitle_languages} already exist (use --force to re-download)"
+            )
+            return existing_result, subtitle_languages
+        else:
+            # Some languages are missing, update subtitle_languages to only download missing ones
+            self.logger.info(
+                f"Found existing download, but missing languages: {remaining_languages}. Downloading only missing languages."
+            )
+            return None, remaining_languages
+
+    def _create_download_options(
+        self, download_metadata: bool, download_subtitles: bool, subtitle_languages: list[str]
+    ) -> tuple[dict[str, Any], YTDLPLogger]:
+        """Create yt-dlp options for downloading transcripts with custom logger.
+
+        Returns:
+            Tuple of (options_dict, logger_instance)
+        """
+        # Create custom logger to capture warnings
+        ytdlp_logger = YTDLPLogger(self.logger)
+
+        options = self._create_ytdlp_options(
+            writeinfojson=download_metadata,
+            writesubtitles=download_subtitles,
+            writeautomaticsub=download_subtitles,
+            skip_download=True,
+            subtitleslangs=subtitle_languages,
+            continue_dl=True,
+            ignoreerrors=True,
+            nooverwrites=False,
+            outtmpl=self._get_output_templates(),
+            logger=ytdlp_logger,  # Use custom logger to capture warnings
+            no_warnings=False,  # Enable warnings so they can be captured
+        )
+
+        return options, ytdlp_logger
+
+    def _get_output_templates(self) -> dict[str, str]:
+        """Get standardized output templates for yt-dlp."""
+        return {
+            "infojson": str(
+                self.output_dir / "%(upload_date>%Y-%m-%d,release_date>%Y-%m-%d,NA)s_%(id)s.%(ext)s"
+            ),
+            "subtitle": str(
+                self.output_dir
+                / "%(upload_date>%Y-%m-%d,release_date>%Y-%m-%d,NA)s_%(id)s.%(subtitle_lang)s.%(ext)s"
+            ),
+        }
+
+    def _perform_video_download(
+        self, video_url: str, video_id: str, subtitle_languages: list[str]
+    ) -> VideoResult:
+        """Perform the actual video download using yt-dlp.
+
+        Args:
+            video_url: The video URL to download
+            video_id: The extracted video ID
+            subtitle_languages: List of subtitle languages to download
+
+        Returns:
+            VideoResult with download status and files
+        """
+        self.logger.info(f"Downloading transcripts for video: {video_id}")
+        self.logger.info(f"Languages requested: {subtitle_languages}")
+
+        # Create download options with custom logger to capture warnings
+        download_subtitles = bool(subtitle_languages)
+        download_metadata = download_subtitles or self.force_download
+
+        self.logger.info(f"Downloading {'metadata and ' if download_metadata else ''}subtitles...")
+
+        download_options, ytdlp_logger = self._create_download_options(
+            download_metadata, download_subtitles, subtitle_languages
+        )
+
+        try:
+            with yt_dlp.YoutubeDL(download_options) as youtube_downloader:
+                video_info = youtube_downloader.extract_info(video_url, download=True)
+
+            if not video_info:
+                return self._create_failed_result(
+                    video_url=video_url,
+                    error_message="Could not extract video information",
+                    video_id=video_id,
+                    warnings=ytdlp_logger.get_warnings(),
+                )
+
+            title = video_info.get("title", "Unknown Title")
+            upload_date = video_info.get("upload_date")
+            actual_video_id = video_info.get("id", video_id)
+
+            title_slug = slugify(title, max_length=self.slug_max_length) if title else "unknown"
+            downloaded_files = self._scan_downloaded_files(actual_video_id)
+            downloaded_files = self._rename_files_with_slug(
+                downloaded_files, actual_video_id, title_slug
+            )
+
+            self.logger.success(f"Successfully downloaded transcripts for: {title}")
+
+            return self._create_success_result(
+                video_id=actual_video_id,
+                title=title,
+                video_url=video_url,
+                upload_date=upload_date,
+                downloaded_files=downloaded_files,
+                warnings=ytdlp_logger.get_warnings(),
+            )
+
+        except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError) as error:
+            error_message = f"Failed to download transcripts: {error!s}"
+            self.logger.error(error_message)
+            return self._create_failed_result(
+                video_url=video_url,
+                error_message=error_message,
+                video_id=video_id,
+                warnings=ytdlp_logger.get_warnings(),
+            )
+        except Exception as error:
+            # Catch any other unexpected errors
+            error_message = f"Unexpected error during download: {error!s}"
+            self.logger.error(error_message)
+            return self._create_failed_result(
+                video_url=video_url,
+                error_message=error_message,
+                video_id=video_id,
+                warnings=ytdlp_logger.get_warnings(),
+            )
 
     def _download_video_transcripts(
         self,
         video_url: str,
-        subtitles_langs: list[str] | None = None,
+        subtitle_languages: list[str] | None = None,
     ) -> VideoResult:
         """Download transcripts for a single video.
 
         Args:
             video_url: YouTube video URL
-            subtitles_langs: List of language codes to download
+            subtitle_languages: List of language codes to download
 
         Returns:
             VideoResult with download status and any files downloaded
         """
-        subtitles_langs = normalize_languages(subtitles_langs)
-
+        subtitle_languages = normalize_languages(subtitle_languages)
         video_id = extract_video_id_from_url(video_url)
+
         if not video_id:
-            error_message = f"Could not extract video ID from URL: {video_url}"
-            self.logger.error(error_message)
-            return VideoResult(
-                video_id=None,
-                url=video_url,
-                success=False,
-                error_message=error_message,
+            return self._create_failed_result(video_url, "Could not extract video ID")
+
+        existing_result = self._check_existing_download(video_id)
+        if existing_result and not self.force_download:
+            result, updated_languages = self._handle_existing_download(
+                existing_result, subtitle_languages
             )
+            if result:
+                return result
+            subtitle_languages = updated_languages
 
-        self.logger.info(f"Downloading transcripts for video: {video_id}")
-        self.logger.info(f"Languages requested: {subtitles_langs}")
-
-        if not self.force_download:
-            existing_result = self._check_existing_download(video_id)
-            if existing_result:
-                # Check which languages are already downloaded
-                downloaded_languages = self._get_downloaded_languages(
-                    existing_result.downloaded_files
-                )
-                remaining_languages = [
-                    lang for lang in subtitles_langs if lang not in downloaded_languages
-                ]
-
-                if not remaining_languages:
-                    # All requested languages are already downloaded
-                    self.logger.info(
-                        f"Skipping download, all requested languages {subtitles_langs} already exist (use --force to re-download)"
-                    )
-                    return existing_result
-                else:
-                    # Some languages are missing, update subtitles_langs to only download missing ones
-                    self.logger.info(
-                        f"Found existing download, but missing languages: {remaining_languages}. Downloading only missing languages."
-                    )
-                    subtitles_langs = remaining_languages
-
-        try:
-            # Determine if we need to download subtitles and metadata
-            need_subtitles = bool(subtitles_langs)
-            need_metadata_file = need_subtitles or self.force_download
-
-            self.logger.info(
-                f"Downloading {'metadata and ' if need_metadata_file else ''}subtitles..."
-            )
-
-            combined_opts = self._create_ytdlp_options(
-                writeinfojson=need_metadata_file,
-                writesubtitles=need_subtitles,
-                writeautomaticsub=need_subtitles,
-                skip_download=True,
-                subtitleslangs=subtitles_langs,
-                continue_dl=True,
-                ignoreerrors=True,
-                nooverwrites=False,  # Should have no effect, since the output files were renamed anyway
-                # NOTE: These yt-dlp naming templates should not be modified as the rename logic
-                # depends on the specific pattern: {date}_{video_id}.{ext} or {date}_{video_id}.{lang}.{ext}
-                outtmpl={
-                    "infojson": str(
-                        self.output_dir
-                        / "%(upload_date>%Y-%m-%d,release_date>%Y-%m-%d,NA)s_%(id)s.%(ext)s"
-                    ),
-                    "subtitle": str(
-                        self.output_dir
-                        / "%(upload_date>%Y-%m-%d,release_date>%Y-%m-%d,NA)s_%(id)s.%(subtitle_lang)s.%(ext)s"
-                    ),
-                },
-            )
-
-            with yt_dlp.YoutubeDL(combined_opts) as ydl:
-                info = ydl.extract_info(video_url, download=True)
-
-            if not info:
-                return VideoResult(
-                    video_id=video_id,
-                    url=video_url,
-                    success=False,
-                    error_message="Could not extract video information",
-                )
-
-            title = info.get("title", "Unknown Title")
-            upload_date = info.get("upload_date")
-            actual_video_id = info.get("id", video_id)
-
-            slug = slugify(title, max_length=self.slug_max_length) if title else "unknown"
-            downloaded_files = self._scan_downloaded_files(actual_video_id)
-            downloaded_files = self._rename_files_with_slug(downloaded_files, actual_video_id, slug)
-
-            self.logger.success(f"Successfully downloaded transcripts for: {title}")
-
-            return VideoResult(
-                video_id=actual_video_id,
-                title=title,
-                url=video_url,
-                upload_date=upload_date,
-                success=True,
-                downloaded_files=downloaded_files,
-            )
-
-        except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError) as e:
-            error_message = f"Failed to download transcripts: {e!s}"
-            self.logger.error(error_message)
-        except Exception as e:
-            # Catch any other unexpected errors
-            error_message = f"Unexpected error during download: {e!s}"
-            self.logger.error(error_message)
-
-        return VideoResult(
-            video_id=video_id, url=video_url, success=False, error_message=error_message
-        )
+        return self._perform_video_download(video_url, video_id, subtitle_languages)
 
     def _download_playlist_transcripts(
         self,
         playlist: PlaylistDetails,
         max_videos: int | None = None,
-        subtitles_langs: list[str] | None = None,
+        subtitle_languages: list[str] | None = None,
     ) -> PlaylistResult:
         """Download transcripts from videos found in a normalized playlist.
 
         Args:
             playlist: Normalized playlist
             max_videos: Maximum number of videos to process
-            subtitles_langs: List of language codes to download (e.g. ['en', 'es'])
+            subtitle_languages: List of language codes to download (e.g. ['en', 'es'])
 
         Returns:
             PlaylistResult with detailed information about what was downloaded
         """
-        subtitles_langs = normalize_languages(subtitles_langs)
+        subtitle_languages = normalize_languages(subtitle_languages)
 
         self.logger.info(f"Downloading from playlist: {playlist.title}")
-        self.logger.info(f"Languages: {subtitles_langs}")
+        self.logger.info(f"Languages: {subtitle_languages}")
         self.logger.info(f"Output directory: {self.output_dir}")
 
         videos_to_process = playlist.video_urls
@@ -735,7 +899,7 @@ class SimpleDownloader:
             self.logger.info(f"Processing video {i}/{total_videos}: {video_url}")
 
             try:
-                video_result = self._download_video_transcripts(video_url, subtitles_langs)
+                video_result = self._download_video_transcripts(video_url, subtitle_languages)
                 video_results.append(video_result)
 
                 if video_result.success:
@@ -745,14 +909,15 @@ class SimpleDownloader:
                     if video_result.error_message:
                         errors.append(f"Video {i}: {video_result.error_message}")
 
-            except Exception as e:
-                error_message = f"Unexpected error processing video {i}: {e}"
+            except Exception as error:
+                error_message = f"Unexpected error processing video {i}: {error}"
                 self.logger.error(error_message)
                 errors.append(error_message)
                 failed_downloads += 1
 
-                video_result = VideoResult(
-                    url=video_url, success=False, error_message=error_message
+                video_result = self._create_failed_result(
+                    video_url=video_url,
+                    error_message=error_message,
                 )
                 video_results.append(video_result)
 

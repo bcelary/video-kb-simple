@@ -65,15 +65,17 @@ def download(
     output_dir.mkdir(exist_ok=True)
 
     # Handle comma-separated language strings and multiple flags
-    processed_languages = []
+    subtitle_languages = []
     if languages:
-        for lang in languages:
+        for language in languages:
             # Split comma-separated languages and strip whitespace
-            processed_languages.extend([s.strip() for s in lang.split(",")])
+            subtitle_languages.extend(
+                [language_code.strip() for language_code in language.split(",")]
+            )
         # Remove duplicates while preserving order
-        processed_languages = list(dict.fromkeys(processed_languages))
+        subtitle_languages = list(dict.fromkeys(subtitle_languages))
     else:
-        processed_languages = ["en"]
+        subtitle_languages = ["en"]
 
     if verbose:
         console.print(f"[green]Downloading transcripts from:[/green] {url}")
@@ -83,7 +85,7 @@ def download(
         )
         if browser_cookies:
             console.print(f"[green]Using cookies from:[/green] {browser_cookies}")
-        console.print(f"[green]Languages:[/green] {', '.join(processed_languages)}")
+        console.print(f"[green]Languages:[/green] {', '.join(subtitle_languages)}")
 
     try:
         downloader = SimpleDownloader(
@@ -96,20 +98,20 @@ def download(
         result = downloader.download_transcripts(
             url=url,
             max_videos=max_videos,
-            langs=processed_languages,
+            subtitle_languages=subtitle_languages,
         )
 
         # Display results
         _display_batch_results(result, console)
 
-    except Exception as e:
-        error_panel = Panel(
-            f"❌ Error: {e!s}",
+    except Exception as error:
+        error_display_panel = Panel(
+            f"❌ Error: {error!s}",
             title="Playlist Download Failed",
             style="red",
         )
-        console.print(error_panel)
-        raise typer.Exit(1) from None
+        console.print(error_display_panel)
+        raise typer.Exit(1) from error
 
 
 def _display_batch_results(result: PlaylistResult, console: Console) -> None:
@@ -136,26 +138,39 @@ def _display_batch_results(result: PlaylistResult, console: Console) -> None:
     console.print(table)
 
     # Show downloaded files
-    all_files = []
+    downloaded_files = []
     for video_result in result.video_results:
         if video_result.success:
             for downloaded_file in video_result.downloaded_files:
-                all_files.append(downloaded_file.path)
+                downloaded_files.append(downloaded_file.path)
 
-    if all_files:
+    if downloaded_files:
         console.print(
-            f"\n[green]Downloaded {len(all_files)} files to:[/green] {all_files[0].parent}"
+            f"\n[green]Downloaded {len(downloaded_files)} files to:[/green] {downloaded_files[0].parent}"
         )
 
-        if len(all_files) <= 10:
+        if len(downloaded_files) <= 10:
             # Show all files if 10 or fewer
-            for file_path in all_files:
-                console.print(f"  📄 {file_path.name}")
+            for downloaded_file_path in downloaded_files:
+                console.print(f"  📄 {downloaded_file_path.name}")
         else:
             # Show first few and summarize
-            for file_path in all_files[:3]:
-                console.print(f"  📄 {file_path.name}")
-            console.print(f"  ... and {len(all_files) - 3} more files")
+            for downloaded_file_path in downloaded_files[:3]:
+                console.print(f"  📄 {downloaded_file_path.name}")
+            console.print(f"  ... and {len(downloaded_files) - 3} more files")
+
+    # Show warnings if any
+    all_warnings = []
+    for video_result in result.video_results:
+        if video_result.warnings:
+            all_warnings.extend(video_result.warnings)
+
+    if all_warnings:
+        console.print(f"\n[yellow]Warnings ({len(all_warnings)}):[/yellow]")
+        for warning in all_warnings[:5]:  # Show first 5 warnings
+            console.print(f"  ⚠️  {warning}")
+        if len(all_warnings) > 5:
+            console.print(f"  ... and {len(all_warnings) - 5} more warnings")
 
     # Show errors if any
     if result.errors:
@@ -167,13 +182,13 @@ def _display_batch_results(result: PlaylistResult, console: Console) -> None:
 
     # Show final success panel
     if result.successful_downloads > 0:
-        success_panel = Panel(
+        success_display_panel = Panel(
             f"✅ Successfully downloaded transcripts from {result.successful_downloads} videos\n"
-            f"📁 Files saved to: [bold blue]{all_files[0].parent if all_files else 'N/A'}[/bold blue]",
+            f"📁 Files saved to: [bold blue]{downloaded_files[0].parent if downloaded_files else 'N/A'}[/bold blue]",
             title="Download Complete",
             style="green",
         )
-        console.print(success_panel)
+        console.print(success_display_panel)
 
 
 @app.callback()
