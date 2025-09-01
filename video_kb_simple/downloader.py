@@ -135,7 +135,7 @@ class VideoResult(BaseModel):
     upload_date: str | None = None
     success: bool = False
     error_message: str | None = None
-    warnings: list[str] = Field(default_factory=list)  # Captured yt-dlp warnings
+    warnings: list[str] = Field(default_factory=list)  # Captured yt-dlp warnings and errors
     downloaded_files: list[DownloadedFile] = Field(default_factory=list)
 
 
@@ -177,22 +177,51 @@ class Logger:
         if self.verbose:
             self.console.print(f"[yellow]{message}[/yellow]")
 
+    def debug(self, message: str) -> None:
+        """Log debug message with cyan styling (always shown regardless of verbosity)."""
+        self.console.print(f"[cyan]{message}[/cyan]")
+
 
 class YTDLPLogger:
     """Custom logger for yt-dlp to capture warnings and errors."""
 
-    def __init__(self, console_logger: Logger):
+    def __init__(self, console_logger: Logger, debug: bool = False):
         self.console_logger = console_logger
+        self.debug_enabled = debug
         self.captured_warnings: list[str] = []
         self.captured_errors: list[str] = []
 
     def debug(self, msg: str) -> None:
         """Handle debug messages."""
-        pass  # Ignore debug messages
+        if self.debug_enabled:
+            # Clean up the message - strip all leading/trailing whitespace and remove yt-dlp prefixes
+            clean_msg = self._clean_message(msg)
+            if clean_msg:
+                self.console_logger.debug(f"[DEBUG] {clean_msg}")
 
     def info(self, msg: str) -> None:
         """Handle info messages."""
-        pass  # Ignore info messages
+        if self.debug_enabled:
+            # Clean up the message - strip all leading/trailing whitespace and remove yt-dlp prefixes
+            clean_msg = self._clean_message(msg)
+            if clean_msg:
+                self.console_logger.debug(f"[INFO] {clean_msg}")
+
+    def _clean_message(self, msg: str) -> str:
+        """Clean yt-dlp message by removing prefixes and extra whitespace."""
+        if not msg:
+            return ""
+
+        # Strip leading/trailing whitespace
+        clean_msg = msg.strip()
+
+        # Remove common yt-dlp prefixes like [download], [info], etc.
+        import re
+
+        clean_msg = re.sub(r"^\[[^\]]+\]\s*", "", clean_msg)
+
+        # Strip again in case the prefix removal left leading whitespace
+        return clean_msg.strip()
 
     def warning(self, msg: str) -> None:
         """Handle warning messages - capture them for reporting."""
@@ -248,6 +277,7 @@ class SimpleDownloader:
         force_download: bool = False,
         browser_for_cookies: str | None = None,
         slug_max_length: int = DEFAULT_SLUG_MAX_LENGTH,
+        debug: bool = False,
     ):
         """Initialize the simple downloader.
 
@@ -257,12 +287,14 @@ class SimpleDownloader:
             force_download: Re-download transcripts even if they already exist
             browser_for_cookies: Browser to extract cookies from (e.g. 'firefox', 'chrome')
             slug_max_length: Maximum length for slugified titles in filenames
+            debug: Enable yt-dlp debug output
         """
         self.output_dir = output_dir
         self.verbose = verbose
         self.force_download = force_download
         self.browser_for_cookies = browser_for_cookies
         self.slug_max_length = slug_max_length
+        self.debug = debug
 
         console = Console()
         self.logger = Logger(console, verbose)
@@ -299,8 +331,8 @@ class SimpleDownloader:
                 ),  # Linear backoff for extractor errors
                 "file_access": lambda n: n,  # Simple linear backoff for file access
             },
-            "quiet": not self.verbose,
-            "no_warnings": not self.verbose,
+            "quiet": not (self.verbose or self.debug),
+            "no_warnings": not (self.verbose or self.debug),
         }
 
         if self.browser_for_cookies:
@@ -570,10 +602,15 @@ class SimpleDownloader:
         self.logger.info(f"Extracting playlist details from: {normalized_url}")
 
         try:
+            # Create custom logger to capture warnings and debug messages
+            ytdlp_logger = YTDLPLogger(self.logger, debug=self.debug)
+
             # Use extract_flat=True to get only playlist metadata and video URLs
             extraction_options = self._create_ytdlp_options(
                 extract_flat=True,
-                quiet=True,  # Minimize output noise during extraction
+                quiet=not self.debug,  # Only quiet if debug is not enabled
+                logger=ytdlp_logger,  # Use custom logger to capture warnings and debug messages
+                no_warnings=False,  # Enable warnings so they can be captured
             )
 
             with yt_dlp.YoutubeDL(extraction_options) as ydl:
@@ -721,7 +758,7 @@ class SimpleDownloader:
             Tuple of (options_dict, logger_instance)
         """
         # Create custom logger to capture warnings
-        ytdlp_logger = YTDLPLogger(self.logger)
+        ytdlp_logger = YTDLPLogger(self.logger, debug=self.debug)
 
         options = self._create_ytdlp_options(
             writeinfojson=download_metadata,
@@ -786,7 +823,7 @@ class SimpleDownloader:
                     video_url=video_url,
                     error_message="Could not extract video information",
                     video_id=video_id,
-                    warnings=ytdlp_logger.get_warnings(),
+                    warnings=ytdlp_logger.get_warnings() + ytdlp_logger.get_errors(),
                 )
 
             title = video_info.get("title", "Unknown Title")
@@ -807,7 +844,7 @@ class SimpleDownloader:
                 video_url=video_url,
                 upload_date=upload_date,
                 downloaded_files=downloaded_files,
-                warnings=ytdlp_logger.get_warnings(),
+                warnings=ytdlp_logger.get_warnings() + ytdlp_logger.get_errors(),
             )
 
         except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError) as error:
@@ -817,7 +854,7 @@ class SimpleDownloader:
                 video_url=video_url,
                 error_message=error_message,
                 video_id=video_id,
-                warnings=ytdlp_logger.get_warnings(),
+                warnings=ytdlp_logger.get_warnings() + ytdlp_logger.get_errors(),
             )
         except Exception as error:
             # Catch any other unexpected errors
@@ -827,7 +864,7 @@ class SimpleDownloader:
                 video_url=video_url,
                 error_message=error_message,
                 video_id=video_id,
-                warnings=ytdlp_logger.get_warnings(),
+                warnings=ytdlp_logger.get_warnings() + ytdlp_logger.get_errors(),
             )
 
     def _download_video_transcripts(

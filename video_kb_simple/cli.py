@@ -60,6 +60,7 @@ def download(
         ),
     ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output")] = False,
+    debug: Annotated[bool, typer.Option("--debug", help="Enable yt-dlp debug output")] = False,
 ) -> None:
     """Download transcripts from a single video, playlist, or channel."""
     output_dir.mkdir(exist_ok=True)
@@ -93,6 +94,7 @@ def download(
             verbose=verbose,
             force_download=force_download,
             browser_for_cookies=browser_cookies,
+            debug=debug,
         )
 
         result = downloader.download_transcripts(
