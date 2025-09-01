@@ -184,9 +184,9 @@ class Logger:
 class SimpleDownloader:
     """Simplified video downloader that focuses on core functionality."""
 
-    DEFAULT_SLEEP_REQUESTS = 2  # Sleep between metadata API requests
-    DEFAULT_SLEEP_SUBTITLES = 35  # Sleep between subtitle downloads
-    DEFAULT_SLEEP_INTERVAL = 5  # Minimum sleep between downloads
+    DEFAULT_SLEEP_REQUESTS = 5  # Sleep between metadata API requests
+    DEFAULT_SLEEP_SUBTITLES = 60  # Sleep between subtitle downloads
+    DEFAULT_SLEEP_INTERVAL = 15  # Minimum sleep between downloads
     DEFAULT_MAX_SLEEP_INTERVAL = 90  # Maximum sleep between downloads
     DEFAULT_RATE_LIMIT = 500000  # Download bandwidth limit (bytes/sec)
     DEFAULT_RETRIES = 3  # Number of download retries
@@ -415,15 +415,28 @@ class SimpleDownloader:
             video_id_part = video_id
             after_video_id = original_name[video_id_pos + len(video_id) :]
 
-            new_name = f"{before_video_id}{video_id_part}_{slug}{after_video_id}"
-            new_path = self.output_dir / new_name
+            # Check what comes after video_id to determine if renaming is needed
+            if after_video_id.startswith("."):
+                # Original yt-dlp pattern (video_id.ext or video_id.lang.ext) - needs renaming
+                new_name = f"{before_video_id}{video_id_part}_{slug}{after_video_id}"
+                new_path = self.output_dir / new_name
 
-            try:
-                file_path.rename(new_path)
-                self.logger.info(f"Renamed: {file_path.name} -> {new_name}")
-                final_path = new_path
-            except OSError as e:
-                self.logger.warning(f"Failed to rename {file_path.name}: {e}")
+                try:
+                    file_path.rename(new_path)
+                    self.logger.info(f"Renamed: {file_path.name} -> {new_name}")
+                    final_path = new_path
+                except OSError as e:
+                    self.logger.warning(f"Failed to rename {file_path.name}: {e}")
+                    final_path = file_path
+            elif after_video_id.startswith("_"):
+                # File already has slug (video_id_slug.ext pattern) - skip renaming
+                self.logger.info(f"File {original_name} already has slug, skipping rename")
+                final_path = file_path
+            else:
+                # Unexpected pattern after video_id - warn but don't rename
+                self.logger.warning(
+                    f"Unexpected pattern after video_id in {original_name}, skipping rename"
+                )
                 final_path = file_path
 
             updated_file = DownloadedFile(
@@ -479,6 +492,21 @@ class SimpleDownloader:
         except (json.JSONDecodeError, OSError, KeyError) as e:
             self.logger.warning(f"Failed to load metadata from {metadata_file.path}: {e}")
             return None
+
+    def _get_downloaded_languages(self, downloaded_files: list[DownloadedFile]) -> set[str]:
+        """Extract set of language codes from downloaded subtitle files.
+
+        Args:
+            downloaded_files: List of DownloadedFile objects
+
+        Returns:
+            Set of language codes that have been downloaded
+        """
+        downloaded_languages = set()
+        for file in downloaded_files:
+            if file.file_type == FILE_TYPE_SUBTITLE and file.language:
+                downloaded_languages.add(file.language)
+        return downloaded_languages
 
     def _extract_playlist_details(
         self, normalized_url: str, playlist_type: PlaylistType
@@ -546,10 +574,7 @@ class SimpleDownloader:
         video_url: str,
         subtitles_langs: list[str] | None = None,
     ) -> VideoResult:
-        """Download transcripts for a single video using metadata-first approach.
-
-        Step 1: Download metadata to get video info
-        Step 2: Download subtitles with requested languages
+        """Download transcripts for a single video.
 
         Args:
             video_url: YouTube video URL
@@ -577,21 +602,47 @@ class SimpleDownloader:
         if not self.force_download:
             existing_result = self._check_existing_download(video_id)
             if existing_result:
-                self.logger.info(
-                    "Skipping download, files already exist (use --force to re-download)"
+                # Check which languages are already downloaded
+                downloaded_languages = self._get_downloaded_languages(
+                    existing_result.downloaded_files
                 )
-                return existing_result
+                remaining_languages = [
+                    lang for lang in subtitles_langs if lang not in downloaded_languages
+                ]
+
+                if not remaining_languages:
+                    # All requested languages are already downloaded
+                    self.logger.info(
+                        f"Skipping download, all requested languages {subtitles_langs} already exist (use --force to re-download)"
+                    )
+                    return existing_result
+                else:
+                    # Some languages are missing, update subtitles_langs to only download missing ones
+                    self.logger.info(
+                        f"Found existing download, but missing languages: {remaining_languages}. Downloading only missing languages."
+                    )
+                    subtitles_langs = remaining_languages
 
         try:
-            # Step 1: Download metadata (JSON info file)
-            self.logger.info("Downloading metadata and requested subtitles...")
+            # Determine if we need to download subtitles and metadata
+            need_subtitles = bool(subtitles_langs)
+            need_metadata_file = need_subtitles or self.force_download
+
+            self.logger.info(
+                f"Downloading {'metadata and ' if need_metadata_file else ''}subtitles..."
+            )
 
             combined_opts = self._create_ytdlp_options(
-                writeinfojson=True,
-                writesubtitles=True,
-                writeautomaticsub=True,
+                writeinfojson=need_metadata_file,
+                writesubtitles=need_subtitles,
+                writeautomaticsub=need_subtitles,
                 skip_download=True,
                 subtitleslangs=subtitles_langs,
+                continue_dl=True,
+                ignoreerrors=True,
+                nooverwrites=False,  # Should have no effect, since the output files were renamed anyway
+                # NOTE: These yt-dlp naming templates should not be modified as the rename logic
+                # depends on the specific pattern: {date}_{video_id}.{ext} or {date}_{video_id}.{lang}.{ext}
                 outtmpl={
                     "infojson": str(
                         self.output_dir
@@ -615,21 +666,12 @@ class SimpleDownloader:
                     error_message="Could not extract video information",
                 )
 
-            # Step 2: Process downloaded metadata and subtitles
             title = info.get("title", "Unknown Title")
             upload_date = info.get("upload_date")
             actual_video_id = info.get("id", video_id)
 
-            self.logger.success(f"Downloaded metadata and subtitles for: {title}")
-
-            # TODO: Step 3+4: Analyze metadata for additional required languages
-            # - Check automatic_captions and subtitles in info dict
-            # - Determine if source languages should be added for completeness
-            # - Download additional subtitles if needed with second yt-dlp call
-
-            downloaded_files = self._scan_downloaded_files(actual_video_id)
-
             slug = slugify(title, max_length=self.slug_max_length) if title else "unknown"
+            downloaded_files = self._scan_downloaded_files(actual_video_id)
             downloaded_files = self._rename_files_with_slug(downloaded_files, actual_video_id, slug)
 
             self.logger.success(f"Successfully downloaded transcripts for: {title}")
