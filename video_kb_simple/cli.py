@@ -161,8 +161,8 @@ def _display_batch_results(result: PlaylistResult, console: Console) -> None:
     """Display playlist download results in a formatted table."""
     # Create summary table
     table = Table(title="Download Summary")
-    table.add_column("Metric", style="cyan", min_width=25)
-    table.add_column("Count", style="green", min_width=25)
+    table.add_column("Metric", style="cyan")
+    table.add_column("Count", style="green")
 
     if result.playlist_details:
         table.add_row("Title", result.playlist_details.title or "Unknown")
@@ -174,9 +174,13 @@ def _display_batch_results(result: PlaylistResult, console: Console) -> None:
         )
 
     table.add_row("Total videos requested", str(result.total_requested))
-    table.add_row("Success downloads", f"✅ {result.success_downloads}")
-    table.add_row("Partial success downloads", f"⚠️ {result.partial_success_downloads}")
-    table.add_row("Failed downloads", f"❌ {result.fail_downloads}")
+
+    table.add_row(":white_check_mark: Success", f"[green]{result.success_downloads}[/green]")
+    table.add_row(
+        ":yellow_circle: Partial success", f"[yellow]{result.partial_success_downloads}[/yellow]"
+    )
+    table.add_row(":cross_mark: Failed", f"[red]{result.fail_downloads}[/red]")
+
     table.add_row("Processing time", f"{result.processing_time_seconds:.1f}s")
 
     console.print(table)
