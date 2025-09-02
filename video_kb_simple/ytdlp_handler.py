@@ -56,6 +56,8 @@ class YTDLPHandler:
 
         console = Console()
         self.logger = Logger(console, log_level)
+        # Create a single YTDLPLogger instance that can be reused
+        self.ytdlp_logger = YTDLPLogger(self.logger, log_level)
 
     def _is_shutdown_requested(self) -> bool:
         """Check if shutdown has been requested."""
@@ -108,6 +110,19 @@ class YTDLPHandler:
 
         return base_options
 
+    def _prepare_ytdlp_options(self, prefix: str, **kwargs: Any) -> dict[str, Any]:
+        """Prepare yt-dlp options with logger setup for the given prefix."""
+        # Configure the shared logger
+        self.ytdlp_logger.set_prefix(prefix)
+        self.ytdlp_logger.clear_captured_logs()
+
+        # Create options with logger and warning capture enabled
+        return self._create_ytdlp_options(
+            logger=self.ytdlp_logger,
+            no_warnings=False,  # Enable warnings so they can be captured
+            **kwargs,
+        )
+
     def _get_output_templates(self) -> dict[str, str]:
         """Get standardized output templates for yt-dlp."""
         return {
@@ -127,15 +142,11 @@ class YTDLPHandler:
         self.logger.info(f"Extracting playlist details from: {normalized_url}")
 
         try:
-            # Create custom logger to capture warnings and debug messages
-            ytdlp_logger = YTDLPLogger(self.logger, self.log_level)
-
-            # Use extract_flat=True to get only playlist metadata and video URLs
-            extraction_options = self._create_ytdlp_options(
+            # Prepare yt-dlp options with playlist prefix
+            extraction_options = self._prepare_ytdlp_options(
+                "PLAYLIST",
                 extract_flat=True,
                 quiet=self.log_level > logging.DEBUG,  # Only quiet if debug is not enabled
-                logger=ytdlp_logger,  # Use custom logger to capture warnings and debug messages
-                no_warnings=False,  # Enable warnings so they can be captured
             )
 
             with yt_dlp.YoutubeDL(extraction_options) as ydl:
@@ -182,12 +193,13 @@ class YTDLPHandler:
         download_subtitles: bool,
         subtitle_languages: list[str],
         video_id: str | None = None,
-    ) -> tuple[dict[str, Any], YTDLPLogger]:
+    ) -> dict[str, Any]:
         """Create yt-dlp options for downloading transcripts with custom logger."""
-        # Create custom logger to capture warnings
-        ytdlp_logger = YTDLPLogger(self.logger, self.log_level, video_id)
+        # Use the shared YTDLPLogger instance with video_id as prefix
+        prefix = video_id if video_id is not None else "VIDEO"
 
-        options = self._create_ytdlp_options(
+        return self._prepare_ytdlp_options(
+            prefix,
             writeinfojson=download_metadata,
             writesubtitles=download_subtitles,
             writeautomaticsub=download_subtitles,
@@ -197,11 +209,7 @@ class YTDLPHandler:
             ignoreerrors=True,
             nooverwrites=False,
             outtmpl=self._get_output_templates(),
-            logger=ytdlp_logger,  # Use custom logger to capture warnings
-            no_warnings=False,  # Enable warnings so they can be captured
         )
-
-        return options, ytdlp_logger
 
     def _scan_downloaded_files(self, video_id: str) -> list[DownloadedFile]:
         """Scan for files matching video_id with optimized globbing."""
@@ -295,7 +303,7 @@ class YTDLPHandler:
 
         self.logger.info(f"Downloading {'metadata and ' if download_metadata else ''}subtitles...")
 
-        download_options, ytdlp_logger = self._create_download_options(
+        download_options = self._create_download_options(
             download_metadata, download_subtitles, subtitle_languages, video_id
         )
 
@@ -312,11 +320,13 @@ class YTDLPHandler:
                 video_info = youtube_downloader.extract_info(video_url, download=True)
 
             if not video_info:
+                warnings, errors = self.ytdlp_logger.get_warnings_and_errors_separate()
                 return self._create_failed_result(
                     video_url=video_url,
                     error_message="Could not extract video information",
                     video_id=video_id,
-                    warnings=ytdlp_logger.get_warnings() + ytdlp_logger.get_errors(),
+                    warnings=warnings,
+                    errors=errors,
                 )
 
             title = video_info.get("title", "Unknown Title")
@@ -331,33 +341,40 @@ class YTDLPHandler:
 
             self.logger.success(f"Successfully downloaded transcripts for: {title}")
 
+            warnings, errors = self.ytdlp_logger.get_warnings_and_errors_separate()
+
             return self._create_success_result(
                 video_id=actual_video_id,
                 title=title,
                 video_url=video_url,
                 upload_date=upload_date,
                 downloaded_files=downloaded_files,
-                warnings=ytdlp_logger.get_warnings() + ytdlp_logger.get_errors(),
+                warnings=warnings,
+                errors=errors,
             )
 
         except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError) as error:
             error_message = f"Failed to download transcripts: {error!s}"
             self.logger.error(error_message)
+            warnings, errors = self.ytdlp_logger.get_warnings_and_errors_separate()
             return self._create_failed_result(
                 video_url=video_url,
                 error_message=error_message,
                 video_id=video_id,
-                warnings=ytdlp_logger.get_warnings() + ytdlp_logger.get_errors(),
+                warnings=warnings,
+                errors=errors,
             )
         except Exception as error:
             # Catch any other unexpected errors
             error_message = f"Unexpected error during download: {error!s}"
             self.logger.error(error_message)
+            warnings, errors = self.ytdlp_logger.get_warnings_and_errors_separate()
             return self._create_failed_result(
                 video_url=video_url,
                 error_message=error_message,
                 video_id=video_id,
-                warnings=ytdlp_logger.get_warnings() + ytdlp_logger.get_errors(),
+                warnings=warnings,
+                errors=errors,
             )
 
     def _create_failed_result(
@@ -368,16 +385,19 @@ class YTDLPHandler:
         title: str | None = None,
         downloaded_files: list[DownloadedFile] | None = None,
         warnings: list[str] | None = None,
+        errors: list[str] | None = None,
     ) -> VideoResult:
         """Create a failed VideoResult with the given error message."""
         self.logger.error(error_message)
+        # If no errors list provided but we have an error_message, add it to errors
+        if not errors:
+            errors = [error_message]
         return VideoResult(
             video_id=video_id,
             title=title,
             url=video_url,
-            success=False,
-            error_message=error_message,
             warnings=warnings or [],
+            errors=errors or [],
             downloaded_files=downloaded_files or [],
         )
 
@@ -389,6 +409,7 @@ class YTDLPHandler:
         upload_date: str | None = None,
         downloaded_files: list[DownloadedFile] | None = None,
         warnings: list[str] | None = None,
+        errors: list[str] | None = None,
     ) -> VideoResult:
         """Create a successful VideoResult with the given information."""
         return VideoResult(
@@ -396,7 +417,7 @@ class YTDLPHandler:
             title=title,
             url=video_url,
             upload_date=upload_date,
-            success=True,
             warnings=warnings or [],
+            errors=errors or [],
             downloaded_files=downloaded_files or [],
         )

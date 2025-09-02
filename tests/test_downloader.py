@@ -75,7 +75,7 @@ class TestYTDLPLogger:
 
 
 class TestVideoResult:
-    """Test VideoResult model with warnings."""
+    """Test VideoResult model with warnings and errors."""
 
     def test_video_result_with_warnings(self):
         """Test that VideoResult can store warnings."""
@@ -83,13 +83,72 @@ class TestVideoResult:
             video_id="test123",
             title="Test Video",
             url="https://example.com",
-            success=True,
             warnings=["Warning 1", "Warning 2"],
+            errors=[],
         )
 
         assert result.video_id == "test123"
         assert result.warnings == ["Warning 1", "Warning 2"]
-        assert result.success is True
+        assert result.errors == []
+        assert result.is_full_success is False  # Has warnings, so not fully successful
+        assert result.is_partial_success is True  # But it's partially successful
+
+    def test_video_result_with_errors(self):
+        """Test that VideoResult can store errors."""
+        result = VideoResult(
+            video_id="test123",
+            title="Test Video",
+            url="https://example.com",
+            warnings=["Warning 1"],
+            errors=["Error 1", "Error 2"],
+        )
+
+        assert result.video_id == "test123"
+        assert result.warnings == ["Warning 1"]
+        assert result.errors == ["Error 1", "Error 2"]
+        assert result.is_fail is True
+
+    def test_video_result_partial_success(self):
+        """Test VideoResult partial success state."""
+        result = VideoResult(
+            video_id="test123",
+            title="Test Video",
+            url="https://example.com",
+            warnings=["Warning 1"],
+            errors=[],
+        )
+
+        assert result.is_partial_success is True
+        assert result.is_full_success is False
+        assert result.is_fail is False
+
+    def test_video_result_fully_successful(self):
+        """Test VideoResult fully successful state."""
+        result = VideoResult(
+            video_id="test123",
+            title="Test Video",
+            url="https://example.com",
+            warnings=[],
+            errors=[],
+        )
+
+        assert result.is_partial_success is False
+        assert result.is_full_success is True
+        assert result.is_fail is False
+
+    def test_video_result_failed(self):
+        """Test VideoResult failed state."""
+        result = VideoResult(
+            video_id="test123",
+            title="Test Video",
+            url="https://example.com",
+            warnings=["Warning 1"],
+            errors=["Error 1"],
+        )
+
+        assert result.is_partial_success is False
+        assert result.is_full_success is False
+        assert result.is_fail is True
 
 
 class TestSimpleDownloader:
@@ -122,8 +181,8 @@ class TestSimpleDownloader:
             title="Test Video",
             url="https://youtube.com/watch?v=dQw4w9WgXcQ",
             upload_date="20230101",
-            success=True,
             warnings=[],
+            errors=[],
             downloaded_files=[],
         )
 
@@ -143,3 +202,63 @@ class TestSimpleDownloader:
         assert isinstance(result, VideoResult)
         assert result.video_id == "dQw4w9WgXcQ"
         assert result.title == "Test Video"
+
+
+class TestCLIReporting:
+    """Test CLI reporting with different video result states."""
+
+    def test_cli_counts_different_result_types(self):
+        """Test that CLI correctly counts fully successful, partial success, and failed videos."""
+        from video_kb_simple.models import PlaylistDetails, PlaylistResult, PlaylistType
+
+        # Create test video results
+        fully_successful_result = VideoResult(
+            video_id="test1",
+            title="Fully Successful Video",
+            url="https://youtube.com/watch?v=test1",
+            warnings=[],
+            errors=[],
+            downloaded_files=[],
+        )
+
+        partial_success_result = VideoResult(
+            video_id="test2",
+            title="Partial Success Video",
+            url="https://youtube.com/watch?v=test2",
+            warnings=["Warning: Some subtitles missing"],
+            errors=[],
+            downloaded_files=[],
+        )
+
+        failed_result = VideoResult(
+            video_id="test3",
+            title="Failed Video",
+            url="https://youtube.com/watch?v=test3",
+            warnings=[],
+            errors=["Error: Download failed"],
+            downloaded_files=[],
+        )
+
+        # Create playlist result
+        playlist_result = PlaylistResult(
+            playlist_details=PlaylistDetails(
+                playlist_id="test_playlist",
+                playlist_type=PlaylistType.PLAYLIST,
+                title="Test Playlist",
+                url="https://youtube.com/playlist?list=test",
+                video_urls=[],
+            ),
+            video_results=[fully_successful_result, partial_success_result, failed_result],
+            total_requested=3,
+            processing_time_seconds=1.5,
+        )
+
+        # Test the counting logic directly
+        fully_successful = sum(1 for vr in playlist_result.video_results if vr.is_full_success)
+        partial_success = sum(1 for vr in playlist_result.video_results if vr.is_partial_success)
+        failed = sum(1 for vr in playlist_result.video_results if vr.is_fail)
+
+        # Verify the counts are correct
+        assert fully_successful == 1
+        assert partial_success == 1
+        assert failed == 1

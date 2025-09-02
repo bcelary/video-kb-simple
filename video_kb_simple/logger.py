@@ -44,12 +44,10 @@ class Logger:
 class YTDLPLogger:
     """Custom logger for yt-dlp to capture warnings and errors."""
 
-    def __init__(
-        self, console_logger: Logger, level: int = logging.INFO, video_id: str | None = None
-    ):
+    def __init__(self, console_logger: Logger, level: int = logging.INFO, prefix: str = "YT-DLP"):
         self.console_logger = console_logger
         self.level = level
-        self.video_id = video_id
+        self.prefix = prefix
         self.captured_warnings: list[str] = []
         self.captured_errors: list[str] = []
 
@@ -57,21 +55,21 @@ class YTDLPLogger:
         """Handle debug messages."""
         if self.level <= logging.DEBUG:
             rich_msg = ansi_to_rich(msg)
-            prefix = escape(f"[YT-DLP] [{self.video_id}]")
+            prefix = escape(f"[YT-DLP] [{self.prefix}]")
             self.console_logger.debug(f"{prefix} {rich_msg}")
 
     def info(self, msg: str) -> None:
         """Handle info messages."""
         if self.level <= logging.DEBUG:
             rich_msg = ansi_to_rich(msg)
-            prefix = escape(f"[YT-DLP] [{self.video_id}]")
+            prefix = escape(f"[YT-DLP] [{self.prefix}]")
             self.console_logger.info(f"{prefix} {rich_msg}")
 
     def warning(self, msg: str) -> None:
         """Handle warning messages - capture them for reporting."""
         if self.level <= logging.WARNING:
             rich_msg = ansi_to_rich(msg)
-            prefix = escape(f"[YT-DLP] [{self.video_id}]")
+            prefix = escape(f"[YT-DLP] [{self.prefix}]")
             full_msg = f"{prefix} {rich_msg}"
             self.console_logger.warning(full_msg)
             self.captured_warnings.append(full_msg)
@@ -80,7 +78,7 @@ class YTDLPLogger:
         """Handle error messages - capture them for reporting."""
         if self.level <= logging.WARNING:
             rich_msg = ansi_to_rich(msg)
-            prefix = escape(f"[YT-DLP] [{self.video_id}]")
+            prefix = escape(f"[YT-DLP] [{self.prefix}]")
             full_msg = f"{prefix} {rich_msg}"
             self.console_logger.error(full_msg)
             self.captured_errors.append(full_msg)
@@ -96,3 +94,20 @@ class YTDLPLogger:
     def has_warnings_or_errors(self) -> bool:
         """Check if any warnings or errors were captured."""
         return bool(self.captured_warnings or self.captured_errors)
+
+    def set_prefix(self, prefix: str) -> None:
+        """Set a new prefix for log messages."""
+        self.prefix = prefix
+
+    def clear_captured_logs(self) -> None:
+        """Clear all captured warnings and errors."""
+        self.captured_warnings.clear()
+        self.captured_errors.clear()
+
+    def get_all_warnings_and_errors(self) -> list[str]:
+        """Get all captured warnings and errors combined."""
+        return self.captured_warnings + self.captured_errors
+
+    def get_warnings_and_errors_separate(self) -> tuple[list[str], list[str]]:
+        """Get warnings and errors as separate lists."""
+        return self.captured_warnings.copy(), self.captured_errors.copy()

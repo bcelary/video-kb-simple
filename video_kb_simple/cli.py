@@ -174,8 +174,9 @@ def _display_batch_results(result: PlaylistResult, console: Console) -> None:
         )
 
     table.add_row("Total videos requested", str(result.total_requested))
-    table.add_row("Successful downloads", f"✅ {result.successful_downloads}")
-    table.add_row("Failed downloads", f"❌ {result.failed_downloads}")
+    table.add_row("Success downloads", f"✅ {result.success_downloads}")
+    table.add_row("Partial success downloads", f"⚠️ {result.partial_success_downloads}")
+    table.add_row("Failed downloads", f"❌ {result.fail_downloads}")
     table.add_row("Processing time", f"{result.processing_time_seconds:.1f}s")
 
     console.print(table)
@@ -183,7 +184,7 @@ def _display_batch_results(result: PlaylistResult, console: Console) -> None:
     # Show downloaded files
     downloaded_files = []
     for video_result in result.video_results:
-        if video_result.success:
+        if video_result.is_full_success:
             for downloaded_file in video_result.downloaded_files:
                 downloaded_files.append(downloaded_file.path)
 
@@ -224,9 +225,10 @@ def _display_batch_results(result: PlaylistResult, console: Console) -> None:
             console.print(f"  ... and {len(result.errors) - 5} more errors")
 
     # Show final success panel
-    if result.successful_downloads > 0:
+    total_successful = result.success_downloads + result.partial_success_downloads
+    if total_successful > 0:
         success_display_panel = Panel(
-            f"✅ Successfully downloaded transcripts from {result.successful_downloads} videos\n"
+            f"✅ Successfully downloaded transcripts from {total_successful} videos\n"
             f"📁 Files saved to: [bold blue]{downloaded_files[0].parent if downloaded_files else 'N/A'}[/bold blue]",
             title="Download Complete",
             style="green",

@@ -139,10 +139,7 @@ class SimpleDownloader:
                     playlist_details=None,
                     video_results=[],
                     total_requested=0,
-                    successful_downloads=0,
-                    failed_downloads=0,
                     processing_time_seconds=time.time() - start_time,
-                    errors=["Failed to extract playlist details"],
                 )
             else:
                 playlist_result = self._download_playlist_transcripts(
@@ -153,15 +150,18 @@ class SimpleDownloader:
         # Check if shutdown was requested during processing
         if self._is_shutdown_requested():
             self.logger.warning("Download was interrupted by user request.")
+            successful_count = (
+                playlist_result.success_downloads + playlist_result.partial_success_downloads
+            )
             self.logger.info(
-                f"Partial results: {playlist_result.successful_downloads} successful, {playlist_result.failed_downloads} failed"
+                f"Partial results: {successful_count} successful, {playlist_result.fail_downloads} failed"
             )
         else:
-            self.logger.success(
-                f"Download completed in {playlist_result.processing_time_seconds:.1f}s"
+            successful_count = (
+                playlist_result.success_downloads + playlist_result.partial_success_downloads
             )
             self.logger.success(
-                f"Success: {playlist_result.successful_downloads}, Failed: {playlist_result.failed_downloads}"
+                f"Success: {successful_count}, Failed: {playlist_result.fail_downloads}"
             )
 
         return playlist_result
@@ -192,13 +192,8 @@ class SimpleDownloader:
             playlist_details=playlist_details,
             video_results=[video_result],
             total_requested=1,
-            successful_downloads=1 if video_result.success else 0,
-            failed_downloads=0 if video_result.success else 1,
             processing_time_seconds=time.time() - start_time,
         )
-
-        if not video_result.success:
-            playlist_result.errors.append(video_result.error_message or "Unknown error")
 
         return playlist_result
 
@@ -224,9 +219,8 @@ class SimpleDownloader:
                 video_id=None,
                 title=None,
                 url=video_url,
-                success=False,
-                error_message="Could not extract video ID",
                 warnings=[],
+                errors=["Could not extract video ID"],
                 downloaded_files=[],
             )
 
@@ -262,8 +256,8 @@ class SimpleDownloader:
                         title=title,
                         url=url,
                         upload_date=upload_date,
-                        success=True,
                         warnings=[],
+                        errors=[],
                         downloaded_files=existing_files,
                     )
                 except (json.JSONDecodeError, OSError, KeyError) as e:
@@ -327,12 +321,14 @@ class SimpleDownloader:
                 video_result = self._download_video_transcripts(video_url, subtitle_languages)
                 video_results.append(video_result)
 
-                if video_result.success:
+                if video_result.is_full_success:
                     successful_downloads += 1
                 else:
                     failed_downloads += 1
-                    if video_result.error_message:
-                        errors.append(f"Video {i}: {video_result.error_message}")
+                    if video_result.errors:
+                        errors.extend([f"Video {i}: {error}" for error in video_result.errors])
+                    else:
+                        errors.append(f"Video {i}: Unknown error")
 
             except Exception as error:
                 error_message = f"Unexpected error processing video {i}: {error}"
@@ -344,9 +340,8 @@ class SimpleDownloader:
                     video_id=None,
                     title=None,
                     url=video_url,
-                    success=False,
-                    error_message=error_message,
                     warnings=[],
+                    errors=[error_message],
                     downloaded_files=[],
                 )
                 video_results.append(video_result)
@@ -359,7 +354,5 @@ class SimpleDownloader:
             playlist_details=playlist,
             video_results=video_results,
             total_requested=total_videos,
-            successful_downloads=successful_downloads,
-            failed_downloads=failed_downloads,
-            errors=errors,
+            processing_time_seconds=0.0,  # Will be set by caller
         )

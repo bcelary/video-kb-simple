@@ -90,7 +90,8 @@ class TestShutdownHandling:
             video_id="test1",
             title="Test Video",
             url="https://youtube.com/watch?v=test1",
-            success=True,
+            warnings=[],
+            errors=[],
             downloaded_files=[],
         )
 
@@ -138,7 +139,8 @@ class TestShutdownHandling:
             video_id="test1",
             title="Test Video",
             url="https://youtube.com/watch?v=test1",
-            success=True,
+            warnings=[],
+            errors=[],
             downloaded_files=[],
         )
 
@@ -168,9 +170,8 @@ class TestShutdownHandling:
                 video_id="dQw4w9WgXcQ",
                 title="Test Video",
                 url="https://youtube.com/watch?v=dQw4w9WgXcQ",
-                success=False,
-                error_message="Download cancelled by user",
                 warnings=[],
+                errors=["Download cancelled by user"],
                 downloaded_files=[],
             )
 
@@ -179,9 +180,9 @@ class TestShutdownHandling:
             )
 
             # Should return failed result due to shutdown
-            assert not result.success
-            assert result.error_message is not None
-            assert "cancelled by user" in result.error_message
+            assert not result.is_full_success
+            assert result.errors
+            assert "cancelled by user" in " ".join(result.errors)
 
             # Verify the mock was called
             mock_download.assert_called_once()
@@ -202,8 +203,8 @@ class TestShutdownHandling:
                 title="Test Video",
                 url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
                 upload_date="20231201",
-                success=True,
                 warnings=[],
+                errors=[],
                 downloaded_files=[],
             )
 
@@ -212,7 +213,7 @@ class TestShutdownHandling:
             )
 
             # Should succeed since no shutdown
-            assert result.success
+            assert result.is_full_success
             assert result.title == "Test Video"
 
     def test_shutdown_logging_in_main_download_method(self):
@@ -279,7 +280,8 @@ class TestShutdownHandlingIntegration:
             video_id="test1",
             title="Test Video",
             url="https://youtube.com/watch?v=test1",
-            success=True,
+            warnings=[],
+            errors=[],
             downloaded_files=[],
         )
 
@@ -308,9 +310,9 @@ class TestShutdownHandlingIntegration:
         result = downloader._download_video_transcripts(test_url)
 
         # Should fail due to immediate shutdown
-        assert not result.success
-        assert result.error_message is not None
-        assert "cancelled by user" in result.error_message
+        assert not result.is_full_success
+        assert result.errors
+        assert "cancelled by user" in " ".join(result.errors)
 
     def test_no_shutdown_callback_provided(self):
         """Test behavior when no shutdown callback is provided."""
@@ -332,7 +334,8 @@ class TestShutdownHandlingIntegration:
             video_id="test",
             title="Test Video",
             url="https://youtube.com/watch?v=test",
-            success=True,
+            warnings=[],
+            errors=[],
             downloaded_files=[],
         )
 
@@ -344,4 +347,5 @@ class TestShutdownHandlingIntegration:
             # Should process all videos since no shutdown callback
             assert mock_download.call_count == 1
             assert len(result.video_results) == 1
-            assert result.successful_downloads == 1
+            successful_count = result.success_downloads + result.partial_success_downloads
+            assert successful_count == 1
