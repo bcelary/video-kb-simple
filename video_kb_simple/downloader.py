@@ -28,21 +28,6 @@ from .ytdlp_handler import YTDLPHandler
 class SimpleDownloader:
     """Simplified video downloader that focuses on core functionality."""
 
-    DEFAULT_SLEEP_REQUESTS = 5  # Sleep between metadata API requests
-    DEFAULT_SLEEP_SUBTITLES = 60  # Sleep between subtitle downloads
-    DEFAULT_SLEEP_INTERVAL = 15  # Minimum sleep between downloads
-    DEFAULT_MAX_SLEEP_INTERVAL = 90  # Maximum sleep between downloads
-    DEFAULT_RATE_LIMIT = 500000  # Download bandwidth limit (bytes/sec)
-    DEFAULT_RETRIES = 3  # Number of download retries
-    DEFAULT_EXTRACTOR_RETRIES = 5  # Number of extractor retries (increased for 429 handling)
-    DEFAULT_FILE_ACCESS_RETRIES = 3  # Number of file access retries
-    # Retry sleep function parameters
-    HTTP_RETRY_BASE = 2  # Base for exponential backoff (2^n)
-    HTTP_RETRY_MAX = 120  # Maximum sleep time for HTTP retries (seconds)
-    EXTRACTOR_RETRY_MULTIPLIER = 5  # Multiplier for linear extractor backoff (5*n)
-    EXTRACTOR_RETRY_MAX = 30  # Maximum sleep time for extractor retries (seconds)
-    SOCKET_TIMEOUT = 30  # Network connection timeout
-
     def __init__(
         self,
         output_dir: Path = Path("./transcripts"),
