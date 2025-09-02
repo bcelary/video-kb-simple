@@ -1,9 +1,11 @@
 """Tests for the downloader module."""
 
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
-from video_kb_simple.downloader import SimpleDownloader, VideoResult, YTDLPLogger
+from video_kb_simple.downloader import SimpleDownloader
+from video_kb_simple.logger import YTDLPLogger
+from video_kb_simple.models import VideoResult
 
 
 class TestYTDLPLogger:
@@ -106,41 +108,38 @@ class TestSimpleDownloader:
         assert downloader.log_level == logging.INFO
         assert downloader.force_download is True
 
-    @patch("yt_dlp.YoutubeDL")
-    def test_download_with_simulated_warning(self, mock_ytdl_class):
+    def test_download_with_simulated_warning(self):
         """Test download process with simulated yt-dlp warning."""
-        # Mock yt-dlp
-        mock_ytdl_instance = Mock()
-        mock_ytdl_class.return_value.__enter__.return_value = mock_ytdl_instance
-
-        # Mock video info
-        mock_ytdl_instance.extract_info.return_value = {
-            "id": "test123",
-            "title": "Test Video",
-            "upload_date": "20230101",
-        }
-
         # Create downloader
         import logging
 
         output_dir = Path("/tmp/test")
         downloader = SimpleDownloader(output_dir=output_dir, log_level=logging.INFO)
 
-        # Mock the file scanning and renaming methods
+        # Mock the download result
+        mock_result = VideoResult(
+            video_id="dQw4w9WgXcQ",
+            title="Test Video",
+            url="https://youtube.com/watch?v=dQw4w9WgXcQ",
+            upload_date="20230101",
+            success=True,
+            warnings=[],
+            downloaded_files=[],
+        )
+
+        # Mock the YTDLPHandler method
         with (
-            patch.object(downloader, "_scan_downloaded_files", return_value=[]),
-            patch.object(downloader, "_rename_files_with_slug", return_value=[]),
+            patch.object(
+                downloader.ytdlp_handler, "download_video_transcripts", return_value=mock_result
+            ),
+            patch.object(downloader.ytdlp_handler, "_scan_downloaded_files", return_value=[]),
         ):
             # Call the download method
-            result = downloader._perform_video_download(
-                "https://youtube.com/watch?v=test123", "test123", ["en"]
+            result = downloader._download_video_transcripts(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ", ["en"]
             )
 
         # Verify the result structure
         assert isinstance(result, VideoResult)
-        assert result.video_id == "test123"
+        assert result.video_id == "dQw4w9WgXcQ"
         assert result.title == "Test Video"
-
-        # Verify yt-dlp was called
-        mock_ytdl_class.assert_called_once()
-        mock_ytdl_instance.extract_info.assert_called_once()

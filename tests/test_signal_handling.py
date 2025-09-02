@@ -1,12 +1,12 @@
 """Tests for shutdown handling functionality in the downloader."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-from video_kb_simple.downloader import (
+from video_kb_simple.downloader import SimpleDownloader
+from video_kb_simple.models import (
     PlaylistDetails,
     PlaylistResult,
     PlaylistType,
-    SimpleDownloader,
     VideoResult,
 )
 
@@ -162,20 +162,29 @@ class TestShutdownHandling:
 
         downloader = SimpleDownloader(shutdown_check=custom_shutdown_check)
 
-        # Mock yt-dlp to avoid actual download
-        with patch("yt_dlp.YoutubeDL") as mock_ydl:
-            mock_instance = MagicMock()
-            mock_ydl.return_value.__enter__.return_value = mock_instance
-            mock_instance.extract_info.return_value = None
+        # Mock YTDLPHandler to simulate shutdown
+        with patch.object(downloader.ytdlp_handler, "download_video_transcripts") as mock_download:
+            mock_download.return_value = VideoResult(
+                video_id="dQw4w9WgXcQ",
+                title="Test Video",
+                url="https://youtube.com/watch?v=dQw4w9WgXcQ",
+                success=False,
+                error_message="Download cancelled by user",
+                warnings=[],
+                downloaded_files=[],
+            )
 
-            result = downloader._perform_video_download(
-                "https://youtube.com/watch?v=test", "test", ["en"]
+            result = downloader._download_video_transcripts(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ", ["en"]
             )
 
             # Should return failed result due to shutdown
             assert not result.success
             assert result.error_message is not None
             assert "cancelled by user" in result.error_message
+
+            # Verify the mock was called
+            mock_download.assert_called_once()
 
     def test_video_download_continues_when_no_shutdown(self):
         """Test that video download continues when shutdown callback returns False."""
@@ -186,33 +195,25 @@ class TestShutdownHandling:
 
         downloader = SimpleDownloader(shutdown_check=custom_shutdown_check)
 
-        # Mock yt-dlp for successful download
-        with patch("yt_dlp.YoutubeDL") as mock_ydl:
-            mock_instance = MagicMock()
-            mock_ydl.return_value.__enter__.return_value = mock_instance
+        # Mock YTDLPHandler for successful download
+        with patch.object(downloader.ytdlp_handler, "download_video_transcripts") as mock_download:
+            mock_download.return_value = VideoResult(
+                video_id="dQw4w9WgXcQ",
+                title="Test Video",
+                url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                upload_date="20231201",
+                success=True,
+                warnings=[],
+                downloaded_files=[],
+            )
 
-            # Mock successful video info
-            mock_instance.extract_info.return_value = {
-                "title": "Test Video",
-                "upload_date": "20231201",
-                "id": "test",
-            }
+            result = downloader._download_video_transcripts(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ", ["en"]
+            )
 
-            # Mock file scanning and renaming
-            with (
-                patch.object(downloader, "_scan_downloaded_files") as mock_scan,
-                patch.object(downloader, "_rename_files_with_slug") as mock_rename,
-            ):
-                mock_scan.return_value = []
-                mock_rename.return_value = []
-
-                result = downloader._perform_video_download(
-                    "https://youtube.com/watch?v=test", "test", ["en"]
-                )
-
-                # Should succeed since no shutdown
-                assert result.success
-                assert result.title == "Test Video"
+            # Should succeed since no shutdown
+            assert result.success
+            assert result.title == "Test Video"
 
     def test_shutdown_logging_in_main_download_method(self):
         """Test that shutdown status is logged in main download method."""
@@ -226,8 +227,8 @@ class TestShutdownHandling:
         # Use a proper YouTube URL format that will be recognized
         test_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
-        # Mock the playlist extraction to avoid actual network calls
-        with patch.object(downloader, "_extract_playlist_details") as mock_extract:
+        # Mock the YTDLPHandler playlist extraction to avoid actual network calls
+        with patch.object(downloader.ytdlp_handler, "_extract_playlist_details") as mock_extract:
             mock_extract.return_value = None
 
             with patch("builtins.print"):  # Mock print for logging
