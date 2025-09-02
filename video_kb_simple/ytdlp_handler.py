@@ -1,7 +1,6 @@
 """yt-dlp operations handler for video-kb-simple."""
 
 import logging
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -19,14 +18,13 @@ class YTDLPHandler:
     """Handles all yt-dlp operations for video downloading and metadata extraction."""
 
     # yt-dlp specific constants (owned by YTDLPHandler)
-    DEFAULT_SLEEP_REQUESTS = 5  # Sleep between metadata API requests
-    DEFAULT_SLEEP_SUBTITLES = 120  # Sleep between subtitle downloads
+    DEFAULT_SLEEP_REQUESTS = 6  # Sleep between metadata API requests
+    DEFAULT_SLEEP_SUBTITLES = 15  # Sleep between subtitle downloads
     DEFAULT_SLEEP_INTERVAL = 15  # Minimum sleep between downloads
     DEFAULT_MAX_SLEEP_INTERVAL = 90  # Maximum sleep between downloads
-    DEFAULT_SLEEP_BEFORE_DOWNLOAD = 120  # Sleep before yt-dlp download to avoid rate limits
-    DEFAULT_RATE_LIMIT = 500000  # Download bandwidth limit (bytes/sec)
+    DEFAULT_RATE_LIMIT = 150000  # Download bandwidth limit (bytes/sec)
     DEFAULT_RETRIES = 3  # Number of download retries
-    DEFAULT_EXTRACTOR_RETRIES = 5  # Number of extractor retries (increased for 429 handling)
+    DEFAULT_EXTRACTOR_RETRIES = 3  # Number of extractor retries
     DEFAULT_FILE_ACCESS_RETRIES = 3  # Number of file access retries
     # Retry sleep function parameters
     HTTP_RETRY_BASE = 2  # Base for exponential backoff (2^n)
@@ -318,12 +316,6 @@ class YTDLPHandler:
                     error_message="Download cancelled by user",
                     video_id=video_id,
                 )
-
-            # Add delay before yt-dlp download to prevent rate limiting
-            self.logger.info(
-                f"Sleeping {self.DEFAULT_SLEEP_BEFORE_DOWNLOAD} seconds before yt-dlp download to avoid rate limits..."
-            )
-            time.sleep(self.DEFAULT_SLEEP_BEFORE_DOWNLOAD)
 
             with yt_dlp.YoutubeDL(download_options) as youtube_downloader:
                 video_info = youtube_downloader.extract_info(video_url, download=True)
