@@ -1,5 +1,8 @@
 """CLI interface for video-kb-simple."""
 
+import logging
+import signal
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated
 
@@ -18,6 +21,33 @@ app = typer.Typer(
     rich_markup_mode="rich",
 )
 console = Console()
+
+
+def create_signal_handler(console: Console) -> Callable[[], bool]:
+    """Create a signal handler that uses the provided console for output."""
+    shutdown_requested = False
+
+    def signal_handler(_signum: int, _frame) -> None:  # type: ignore[no-untyped-def]
+        nonlocal shutdown_requested
+        if not shutdown_requested:
+            shutdown_requested = True
+            console.print(
+                "\n[yellow]Shutdown requested. Finishing current download and exiting gracefully...[/yellow]"
+            )
+            console.print("[dim]Press Ctrl+C again to force immediate exit.[/dim]")
+
+    def is_shutdown_requested() -> bool:
+        return shutdown_requested
+
+    def setup_signals() -> None:
+        """Set up signal handlers for graceful shutdown."""
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+
+    # Set up the signals
+    setup_signals()
+
+    return is_shutdown_requested
 
 
 def version_callback(value: bool) -> None:
@@ -78,6 +108,14 @@ def download(
     else:
         subtitle_languages = ["en"]
 
+    # Translate verbose/debug flags to log level
+    if debug:
+        log_level = logging.DEBUG
+    elif verbose:
+        log_level = logging.INFO
+    else:
+        log_level = logging.WARNING
+
     if verbose:
         console.print(f"[green]Downloading transcripts from:[/green] {url}")
         console.print(f"[green]Output directory:[/green] {output_dir}")
@@ -89,12 +127,15 @@ def download(
         console.print(f"[green]Languages:[/green] {', '.join(subtitle_languages)}")
 
     try:
+        # Create signal handler for graceful shutdown
+        shutdown_check = create_signal_handler(console)
+
         downloader = SimpleDownloader(
             output_dir=output_dir,
-            verbose=verbose,
+            log_level=log_level,
             force_download=force_download,
             browser_for_cookies=browser_cookies,
-            debug=debug,
+            shutdown_check=shutdown_check,
         )
 
         result = downloader.download_transcripts(

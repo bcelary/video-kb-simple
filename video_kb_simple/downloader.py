@@ -1,8 +1,10 @@
 """Simplified video downloader and transcript extractor using yt-dlp."""
 
 import json
+import logging
 import re
 import time
+from collections.abc import Callable
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -10,7 +12,10 @@ from typing import Any
 import yt_dlp
 from pydantic import BaseModel, Field
 from rich.console import Console
+from rich.markup import escape
 from slugify import slugify
+
+from .ansi_converter import ansi_to_rich
 
 YOUTUBE_VIDEO_URL_PATTERNS = [
     r"(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/)([a-zA-Z0-9_-]{11})",
@@ -154,90 +159,79 @@ class PlaylistResult(BaseModel):
 class Logger:
     """Simple logger that handles verbosity internally with consistent color styling."""
 
-    def __init__(self, console: Console, verbose: bool = False):
+    def __init__(self, console: Console, level: int = logging.INFO):
         self.console = console
-        self.verbose = verbose
-
-    def info(self, message: str) -> None:
-        """Log info message with blue styling if verbose is enabled."""
-        if self.verbose:
-            self.console.print(f"[blue]{message}[/blue]")
-
-    def error(self, message: str) -> None:
-        """Log error message with red styling (always shown regardless of verbosity)."""
-        self.console.print(f"[red]{message}[/red]")
-
-    def success(self, message: str) -> None:
-        """Log success message with green styling if verbose is enabled."""
-        if self.verbose:
-            self.console.print(f"[green]{message}[/green]")
-
-    def warning(self, message: str) -> None:
-        """Log warning message with yellow styling if verbose is enabled."""
-        if self.verbose:
-            self.console.print(f"[yellow]{message}[/yellow]")
+        self.level = level
 
     def debug(self, message: str) -> None:
-        """Log debug message with cyan styling (always shown regardless of verbosity)."""
-        self.console.print(f"[cyan]{message}[/cyan]")
+        """Log debug message with cyan styling if level allows."""
+        if self.level <= logging.DEBUG:
+            self.console.print(message, style="cyan")
+
+    def info(self, message: str) -> None:
+        """Log info message with blue styling if level allows."""
+        if self.level <= logging.INFO:
+            self.console.print(message, style="blue")
+
+    def warning(self, message: str) -> None:
+        """Log warning message with yellow styling if level allows."""
+        if self.level <= logging.WARNING:
+            self.console.print(message, style="yellow")
+
+    def error(self, message: str) -> None:
+        """Log error message with red styling (always shown regardless of level)."""
+        if self.level <= logging.ERROR:
+            self.console.print(message, style="red")
+
+    def success(self, message: str) -> None:
+        """Log success message with green styling if level allows."""
+        if self.level <= logging.ERROR:
+            self.console.print(message, style="green")
 
 
 class YTDLPLogger:
     """Custom logger for yt-dlp to capture warnings and errors."""
 
-    def __init__(self, console_logger: Logger, debug: bool = False):
+    def __init__(
+        self, console_logger: Logger, level: int = logging.INFO, video_id: str | None = None
+    ):
         self.console_logger = console_logger
-        self.debug_enabled = debug
+        self.level = level
+        self.video_id = video_id
         self.captured_warnings: list[str] = []
         self.captured_errors: list[str] = []
 
     def debug(self, msg: str) -> None:
         """Handle debug messages."""
-        if self.debug_enabled:
-            # Clean up the message - strip all leading/trailing whitespace and remove yt-dlp prefixes
-            clean_msg = self._clean_message(msg)
-            if clean_msg:
-                self.console_logger.debug(f"[DEBUG] {clean_msg}")
+        if self.level <= logging.DEBUG:
+            rich_msg = ansi_to_rich(msg)
+            prefix = escape(f"[YT-DLP] [{self.video_id}]")
+            self.console_logger.debug(f"{prefix} {rich_msg}")
 
     def info(self, msg: str) -> None:
         """Handle info messages."""
-        if self.debug_enabled:
-            # Clean up the message - strip all leading/trailing whitespace and remove yt-dlp prefixes
-            clean_msg = self._clean_message(msg)
-            if clean_msg:
-                self.console_logger.debug(f"[INFO] {clean_msg}")
-
-    def _clean_message(self, msg: str) -> str:
-        """Clean yt-dlp message by removing prefixes and extra whitespace."""
-        if not msg:
-            return ""
-
-        # Strip leading/trailing whitespace
-        clean_msg = msg.strip()
-
-        # Remove common yt-dlp prefixes like [download], [info], etc.
-        import re
-
-        clean_msg = re.sub(r"^\[[^\]]+\]\s*", "", clean_msg)
-
-        # Strip again in case the prefix removal left leading whitespace
-        return clean_msg.strip()
+        if self.level <= logging.DEBUG:
+            rich_msg = ansi_to_rich(msg)
+            prefix = escape(f"[YT-DLP] [{self.video_id}]")
+            self.console_logger.info(f"{prefix} {rich_msg}")
 
     def warning(self, msg: str) -> None:
         """Handle warning messages - capture them for reporting."""
-        # Clean up the message
-        clean_msg = msg.strip()
-        if clean_msg:
-            self.captured_warnings.append(clean_msg)
-            self.console_logger.warning(clean_msg)
+        if self.level <= logging.WARNING:
+            rich_msg = ansi_to_rich(msg)
+            prefix = escape(f"[YT-DLP] [{self.video_id}]")
+            full_msg = f"{prefix} {rich_msg}"
+            self.console_logger.warning(full_msg)
+            self.captured_warnings.append(full_msg)
 
     def error(self, msg: str) -> None:
         """Handle error messages - capture them for reporting."""
-        # Clean up the message
-        clean_msg = msg.strip()
-        if clean_msg:
-            self.captured_errors.append(clean_msg)
-            self.console_logger.error(clean_msg)
+        if self.level <= logging.WARNING:
+            rich_msg = ansi_to_rich(msg)
+            prefix = escape(f"[YT-DLP] [{self.video_id}]")
+            full_msg = f"{prefix} {rich_msg}"
+            self.console_logger.error(full_msg)
+            self.captured_errors.append(full_msg)
 
     def get_warnings(self) -> list[str]:
         """Get all captured warnings."""
@@ -273,32 +267,46 @@ class SimpleDownloader:
     def __init__(
         self,
         output_dir: Path = Path("./transcripts"),
-        verbose: bool = False,
+        log_level: int = logging.INFO,
         force_download: bool = False,
         browser_for_cookies: str | None = None,
         slug_max_length: int = DEFAULT_SLUG_MAX_LENGTH,
-        debug: bool = False,
+        shutdown_check: Callable[[], bool] | None = None,
     ):
         """Initialize the simple downloader.
 
         Args:
             output_dir: Directory to save transcripts
-            verbose: Enable verbose output
+            log_level: Logging level (e.g. logging.DEBUG, logging.INFO)
             force_download: Re-download transcripts even if they already exist
             browser_for_cookies: Browser to extract cookies from (e.g. 'firefox', 'chrome')
             slug_max_length: Maximum length for slugified titles in filenames
-            debug: Enable yt-dlp debug output
+            shutdown_check: Optional callback to check if shutdown was requested
         """
         self.output_dir = output_dir
-        self.verbose = verbose
+        self.log_level = log_level
         self.force_download = force_download
         self.browser_for_cookies = browser_for_cookies
         self.slug_max_length = slug_max_length
-        self.debug = debug
+        self.shutdown_check = shutdown_check
 
         console = Console()
-        self.logger = Logger(console, verbose)
+        self.logger = Logger(console, log_level)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _is_shutdown_requested(self) -> bool:
+        """Check if shutdown has been requested.
+
+        Uses the custom shutdown_check callback if provided, otherwise returns False.
+        Handles exceptions in the callback gracefully.
+        """
+        if self.shutdown_check is not None:
+            try:
+                return self.shutdown_check()
+            except Exception:
+                # If callback fails, assume no shutdown requested
+                return False
+        return False
 
     def _create_ytdlp_options(self, **kwargs: Any) -> dict[str, Any]:
         """Create yt-dlp options dictionary with rate limiting and sensible defaults.
@@ -331,8 +339,8 @@ class SimpleDownloader:
                 ),  # Linear backoff for extractor errors
                 "file_access": lambda n: n,  # Simple linear backoff for file access
             },
-            "quiet": not (self.verbose or self.debug),
-            "no_warnings": not (self.verbose or self.debug),
+            "quiet": self.log_level > logging.DEBUG,
+            "no_warnings": self.log_level > logging.DEBUG,
         }
 
         if self.browser_for_cookies:
@@ -340,6 +348,16 @@ class SimpleDownloader:
 
         # Override with any provided options
         base_options.update(kwargs)
+
+        # Debug logging: Print options when log level is DEBUG
+        if self.log_level <= logging.DEBUG:
+            self.logger.debug("yt-dlp options created:")
+            import pprint
+
+            options_str = pprint.pformat(base_options, width=120, depth=4)
+            for line in options_str.split("\n"):
+                self.logger.debug(f"  {line}")
+
         return base_options
 
     def download_transcripts(
@@ -398,10 +416,19 @@ class SimpleDownloader:
                 )
                 playlist_result.processing_time_seconds = time.time() - start_time
 
-        self.logger.success(f"Download completed in {playlist_result.processing_time_seconds:.1f}s")
-        self.logger.success(
-            f"Success: {playlist_result.successful_downloads}, Failed: {playlist_result.failed_downloads}"
-        )
+        # Check if shutdown was requested during processing
+        if self._is_shutdown_requested():
+            self.logger.warning("Download was interrupted by user request.")
+            self.logger.info(
+                f"Partial results: {playlist_result.successful_downloads} successful, {playlist_result.failed_downloads} failed"
+            )
+        else:
+            self.logger.success(
+                f"Download completed in {playlist_result.processing_time_seconds:.1f}s"
+            )
+            self.logger.success(
+                f"Success: {playlist_result.successful_downloads}, Failed: {playlist_result.failed_downloads}"
+            )
 
         return playlist_result
 
@@ -603,12 +630,12 @@ class SimpleDownloader:
 
         try:
             # Create custom logger to capture warnings and debug messages
-            ytdlp_logger = YTDLPLogger(self.logger, debug=self.debug)
+            ytdlp_logger = YTDLPLogger(self.logger, self.log_level)
 
             # Use extract_flat=True to get only playlist metadata and video URLs
             extraction_options = self._create_ytdlp_options(
                 extract_flat=True,
-                quiet=not self.debug,  # Only quiet if debug is not enabled
+                quiet=self.log_level > logging.DEBUG,  # Only quiet if debug is not enabled
                 logger=ytdlp_logger,  # Use custom logger to capture warnings and debug messages
                 no_warnings=False,  # Enable warnings so they can be captured
             )
@@ -750,15 +777,25 @@ class SimpleDownloader:
             return None, remaining_languages
 
     def _create_download_options(
-        self, download_metadata: bool, download_subtitles: bool, subtitle_languages: list[str]
+        self,
+        download_metadata: bool,
+        download_subtitles: bool,
+        subtitle_languages: list[str],
+        video_id: str | None = None,
     ) -> tuple[dict[str, Any], YTDLPLogger]:
         """Create yt-dlp options for downloading transcripts with custom logger.
+
+        Args:
+            download_metadata: Whether to download metadata
+            download_subtitles: Whether to download subtitles
+            subtitle_languages: List of subtitle languages
+            video_id: Optional video ID to include in error/warning messages
 
         Returns:
             Tuple of (options_dict, logger_instance)
         """
         # Create custom logger to capture warnings
-        ytdlp_logger = YTDLPLogger(self.logger, debug=self.debug)
+        ytdlp_logger = YTDLPLogger(self.logger, self.log_level, video_id)
 
         options = self._create_ytdlp_options(
             writeinfojson=download_metadata,
@@ -811,10 +848,18 @@ class SimpleDownloader:
         self.logger.info(f"Downloading {'metadata and ' if download_metadata else ''}subtitles...")
 
         download_options, ytdlp_logger = self._create_download_options(
-            download_metadata, download_subtitles, subtitle_languages
+            download_metadata, download_subtitles, subtitle_languages, video_id
         )
 
         try:
+            # Check for shutdown signal before starting yt-dlp download
+            if self._is_shutdown_requested():
+                return self._create_failed_result(
+                    video_url=video_url,
+                    error_message="Download cancelled by user",
+                    video_id=video_id,
+                )
+
             with yt_dlp.YoutubeDL(download_options) as youtube_downloader:
                 video_info = youtube_downloader.extract_info(video_url, download=True)
 
@@ -933,6 +978,13 @@ class SimpleDownloader:
         errors = []
 
         for i, video_url in enumerate(videos_to_process, 1):
+            # Check for shutdown signal before processing each video
+            if self._is_shutdown_requested():
+                self.logger.warning(
+                    f"Shutdown requested. Stopping after processing {i - 1}/{total_videos} videos."
+                )
+                break
+
             self.logger.info(f"Processing video {i}/{total_videos}: {video_url}")
 
             try:

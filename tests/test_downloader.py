@@ -11,13 +11,15 @@ class TestYTDLPLogger:
 
     def test_warning_capture(self):
         """Test that warnings are captured correctly."""
+        import logging
+
         from rich.console import Console
 
         from video_kb_simple.downloader import Logger
 
         console = Console()
-        logger = Logger(console, verbose=True)
-        ytdlp_logger = YTDLPLogger(logger)
+        logger = Logger(console, logging.INFO)
+        ytdlp_logger = YTDLPLogger(logger, logging.INFO, "test123")
 
         # Test warning capture
         ytdlp_logger.warning("Test warning message")
@@ -25,35 +27,39 @@ class TestYTDLPLogger:
 
         warnings = ytdlp_logger.get_warnings()
         assert len(warnings) == 2
-        assert "Test warning message" in warnings
-        assert "Another warning" in warnings
+        assert "[YT-DLP] \\[test123] Test warning message" in warnings
+        assert "[YT-DLP] \\[test123] Another warning" in warnings
 
     def test_error_capture(self):
         """Test that errors are captured correctly."""
+        import logging
+
         from rich.console import Console
 
         from video_kb_simple.downloader import Logger
 
         console = Console()
-        logger = Logger(console, verbose=True)
-        ytdlp_logger = YTDLPLogger(logger)
+        logger = Logger(console, logging.INFO)
+        ytdlp_logger = YTDLPLogger(logger, logging.INFO, "test123")
 
         # Test error capture
         ytdlp_logger.error("Test error message")
 
         errors = ytdlp_logger.get_errors()
         assert len(errors) == 1
-        assert "Test error message" in errors[0]
+        assert "[YT-DLP] \\[test123] Test error message" in errors[0]
 
     def test_has_warnings_or_errors(self):
         """Test the has_warnings_or_errors method."""
+        import logging
+
         from rich.console import Console
 
         from video_kb_simple.downloader import Logger
 
         console = Console()
-        logger = Logger(console, verbose=True)
-        ytdlp_logger = YTDLPLogger(logger)
+        logger = Logger(console, logging.INFO)
+        ytdlp_logger = YTDLPLogger(logger, logging.INFO, "test123")
 
         assert not ytdlp_logger.has_warnings_or_errors()
 
@@ -61,7 +67,7 @@ class TestYTDLPLogger:
         assert ytdlp_logger.has_warnings_or_errors()
 
         # Reset logger
-        ytdlp_logger = YTDLPLogger(logger)
+        ytdlp_logger = YTDLPLogger(logger, logging.INFO, "test123")
         ytdlp_logger.error("Test error")
         assert ytdlp_logger.has_warnings_or_errors()
 
@@ -89,11 +95,15 @@ class TestSimpleDownloader:
 
     def test_downloader_initialization(self):
         """Test that downloader initializes correctly."""
+        import logging
+
         output_dir = Path("/tmp/test")
-        downloader = SimpleDownloader(output_dir=output_dir, verbose=True, force_download=True)
+        downloader = SimpleDownloader(
+            output_dir=output_dir, log_level=logging.INFO, force_download=True
+        )
 
         assert downloader.output_dir == output_dir
-        assert downloader.verbose is True
+        assert downloader.log_level == logging.INFO
         assert downloader.force_download is True
 
     @patch("yt_dlp.YoutubeDL")
@@ -111,8 +121,10 @@ class TestSimpleDownloader:
         }
 
         # Create downloader
+        import logging
+
         output_dir = Path("/tmp/test")
-        downloader = SimpleDownloader(output_dir=output_dir, verbose=True)
+        downloader = SimpleDownloader(output_dir=output_dir, log_level=logging.INFO)
 
         # Mock the file scanning and renaming methods
         with (
