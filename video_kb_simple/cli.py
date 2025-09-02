@@ -161,8 +161,8 @@ def _display_batch_results(result: PlaylistResult, console: Console) -> None:
     """Display playlist download results in a formatted table."""
     # Create summary table
     table = Table(title="Download Summary")
-    table.add_column("Metric", style="cyan")
-    table.add_column("Count", style="green")
+    table.add_column("Metric", style="cyan", min_width=25)
+    table.add_column("Count", style="green", min_width=25)
 
     if result.playlist_details:
         table.add_row("Title", result.playlist_details.title or "Unknown")
