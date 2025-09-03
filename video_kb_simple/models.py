@@ -6,13 +6,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 
-class DownloadError(Exception):
-    """Base exception for downloader setup/initialization errors."""
-
-    pass
-
-
-class URLNormalizationError(DownloadError):
+class URLNormalizationError(Exception):
     """Raised when URL cannot be normalized or is invalid."""
 
     pass

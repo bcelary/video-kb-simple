@@ -26,15 +26,23 @@ console = Console()
 def create_signal_handler(console: Console) -> Callable[[], bool]:
     """Create a signal handler that uses the provided console for output."""
     shutdown_requested = False
+    signal_count = 0
 
     def signal_handler(_signum: int, _frame) -> None:  # type: ignore[no-untyped-def]
-        nonlocal shutdown_requested
-        if not shutdown_requested:
+        nonlocal shutdown_requested, signal_count
+        signal_count += 1
+
+        if signal_count == 1:
+            # First signal - request graceful shutdown
             shutdown_requested = True
             console.print(
                 "\n[yellow]Shutdown requested. Finishing current download and exiting gracefully...[/yellow]"
             )
             console.print("[dim]Press Ctrl+C again to force immediate exit.[/dim]")
+        else:
+            # Second signal - force immediate exit
+            console.print("\n[red]Force exiting immediately...[/red]")
+            exit(1)
 
     def is_shutdown_requested() -> bool:
         return shutdown_requested
@@ -182,6 +190,26 @@ def _display_batch_results(result: PlaylistResult, console: Console) -> None:
     table.add_row(":cross_mark: Failed", f"[red]{result.fail_downloads}[/red]")
 
     table.add_row("Processing time", f"{result.processing_time_seconds:.1f}s")
+
+    # Calculate language-specific download counts and add to table
+    total_successful = result.success_downloads + result.partial_success_downloads
+    if total_successful > 0:
+        table.add_row("Total successful downloads", f"[green]{total_successful}[/green]")
+
+        # Count downloads by language
+        language_counts: dict[str, int] = {}
+        for video_result in result.video_results:
+            if video_result.is_full_success or video_result.is_partial_success:
+                for downloaded_file in video_result.downloaded_files:
+                    if downloaded_file.language:
+                        language_counts[downloaded_file.language] = (
+                            language_counts.get(downloaded_file.language, 0) + 1
+                        )
+
+        if language_counts:
+            # Add language breakdown rows to the table
+            for lang, count in sorted(language_counts.items()):
+                table.add_row(f"  └─ {lang} downloads", f"[blue]{count}[/blue]")
 
     console.print(table)
 
