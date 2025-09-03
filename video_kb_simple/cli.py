@@ -15,6 +15,12 @@ from rich.table import Table
 from video_kb_simple import __version__
 from video_kb_simple.downloader import PlaylistResult, SimpleDownloader
 
+# Constants
+MAX_FILES_TO_SHOW_INDIVIDUALLY = 10
+MAX_WARNINGS_ERRORS_TO_SHOW = 5
+MAX_FILES_TO_SHOW_BEFORE_SUMMARY = 3
+DEFAULT_LANGUAGE = "en"
+
 app = typer.Typer(
     name="video-kb",
     help="Extract transcribed text from videos using yt-dlp",
@@ -103,20 +109,15 @@ def download(
     """Download transcripts from a single video, playlist, or channel."""
     output_dir.mkdir(exist_ok=True)
 
-    # Handle comma-separated language strings and multiple flags
-    subtitle_languages = []
+    # Process language options: handle comma-separated values and remove duplicates
     if languages:
-        for language in languages:
-            # Split comma-separated languages and strip whitespace
-            subtitle_languages.extend(
-                [language_code.strip() for language_code in language.split(",")]
-            )
-        # Remove duplicates while preserving order
-        subtitle_languages = list(dict.fromkeys(subtitle_languages))
+        selected_languages = list(
+            dict.fromkeys(lang.strip() for language in languages for lang in language.split(","))
+        )
     else:
-        subtitle_languages = ["en"]
+        selected_languages = [DEFAULT_LANGUAGE]
 
-    # Translate verbose/debug flags to log level
+    # Set log level based on flags
     if debug:
         log_level = logging.DEBUG
     elif verbose:
@@ -132,7 +133,7 @@ def download(
         )
         if browser_cookies:
             console.print(f"[green]Using cookies from:[/green] {browser_cookies}")
-        console.print(f"[green]Languages:[/green] {', '.join(subtitle_languages)}")
+        console.print(f"[green]Languages:[/green] {', '.join(selected_languages)}")
 
     try:
         # Create signal handler for graceful shutdown
@@ -149,7 +150,7 @@ def download(
         result = downloader.download_transcripts(
             url=url,
             max_videos=max_videos,
-            subtitle_languages=subtitle_languages,
+            subtitle_languages=selected_languages,
         )
 
         # Display results
@@ -163,6 +164,26 @@ def download(
         )
         console.print(error_display_panel)
         raise typer.Exit(1) from error
+
+
+def _display_items(items: list[str], label: str, console: Console, color: str = "yellow") -> None:
+    """Display a list of items (warnings/errors) with truncation if needed.
+
+    Args:
+        items: List of strings to display
+        label: Label for the items (e.g., "Warnings", "Errors")
+        console: Rich console for output
+        color: Color for the label ("yellow" for warnings, "red" for errors)
+    """
+    if not items:
+        return
+
+    console.print(f"\n[{color}]{label} ({len(items)}):[/{color}]")
+    icon = "⚠️" if color == "yellow" else "•"
+    for item in items[:MAX_WARNINGS_ERRORS_TO_SHOW]:
+        console.print(f"  {icon}  {item}")
+    if len(items) > MAX_WARNINGS_ERRORS_TO_SHOW:
+        console.print(f"  ... and {len(items) - MAX_WARNINGS_ERRORS_TO_SHOW} more {label.lower()}")
 
 
 def _display_batch_results(result: PlaylistResult, console: Console) -> None:
@@ -197,18 +218,18 @@ def _display_batch_results(result: PlaylistResult, console: Console) -> None:
         table.add_row("Total successful downloads", f"[green]{total_successful}[/green]")
 
         # Count downloads by language
-        language_counts: dict[str, int] = {}
+        downloads_by_lang: dict[str, int] = {}
         for video_result in result.video_results:
             if video_result.is_full_success or video_result.is_partial_success:
                 for downloaded_file in video_result.downloaded_files:
                     if downloaded_file.language:
-                        language_counts[downloaded_file.language] = (
-                            language_counts.get(downloaded_file.language, 0) + 1
+                        downloads_by_lang[downloaded_file.language] = (
+                            downloads_by_lang.get(downloaded_file.language, 0) + 1
                         )
 
-        if language_counts:
+        if downloads_by_lang:
             # Add language breakdown rows to the table
-            for lang, count in sorted(language_counts.items()):
+            for lang, count in sorted(downloads_by_lang.items()):
                 table.add_row(f"  └─ {lang} downloads", f"[blue]{count}[/blue]")
 
     console.print(table)
@@ -225,36 +246,26 @@ def _display_batch_results(result: PlaylistResult, console: Console) -> None:
             f"\n[green]Downloaded {len(downloaded_files)} files to:[/green] {downloaded_files[0].parent}"
         )
 
-        if len(downloaded_files) <= 10:
-            # Show all files if 10 or fewer
-            for downloaded_file_path in downloaded_files:
-                console.print(f"  📄 {downloaded_file_path.name}")
+        if len(downloaded_files) <= MAX_FILES_TO_SHOW_INDIVIDUALLY:
+            # Show all files if threshold or fewer
+            for file_path in downloaded_files:
+                console.print(f"  📄 {file_path.name}")
         else:
             # Show first few and summarize
-            for downloaded_file_path in downloaded_files[:3]:
-                console.print(f"  📄 {downloaded_file_path.name}")
-            console.print(f"  ... and {len(downloaded_files) - 3} more files")
+            for file_path in downloaded_files[:MAX_FILES_TO_SHOW_BEFORE_SUMMARY]:
+                console.print(f"  📄 {file_path.name}")
+            console.print(
+                f"  ... and {len(downloaded_files) - MAX_FILES_TO_SHOW_BEFORE_SUMMARY} more files"
+            )
 
-    # Show warnings if any
+    # Show warnings and errors
     all_warnings = []
     for video_result in result.video_results:
         if video_result.warnings:
             all_warnings.extend(video_result.warnings)
 
-    if all_warnings:
-        console.print(f"\n[yellow]Warnings ({len(all_warnings)}):[/yellow]")
-        for warning in all_warnings[:5]:  # Show first 5 warnings
-            console.print(f"  ⚠️  {warning}")
-        if len(all_warnings) > 5:
-            console.print(f"  ... and {len(all_warnings) - 5} more warnings")
-
-    # Show errors if any
-    if result.errors:
-        console.print(f"\n[red]Errors ({len(result.errors)}):[/red]")
-        for error in result.errors[:5]:  # Show first 5 errors
-            console.print(f"  • {error}")
-        if len(result.errors) > 5:
-            console.print(f"  ... and {len(result.errors) - 5} more errors")
+    _display_items(all_warnings, "Warnings", console, "yellow")
+    _display_items(result.errors, "Errors", console, "red")
 
     # Show final success panel
     total_successful = result.success_downloads + result.partial_success_downloads
@@ -277,5 +288,9 @@ def main(
         ),
     ] = None,
 ) -> None:
-    """Video Knowledge Base - Extract transcripts from videos."""
+    """CLI application for extracting video transcripts using yt-dlp.
+
+    This is the main entry point for the video-kb CLI tool that provides
+    commands for downloading transcripts from YouTube videos, playlists, and channels.
+    """
     pass

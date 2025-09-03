@@ -12,7 +12,12 @@ import pytest
 from typer.testing import CliRunner
 
 from video_kb_simple import __version__
-from video_kb_simple.cli import app
+from video_kb_simple.cli import _display_batch_results, _display_items, app
+from video_kb_simple.models import (
+    PlaylistDetails,
+    PlaylistResult,
+    PlaylistType,
+)
 
 runner = CliRunner()
 
@@ -106,3 +111,124 @@ def test_double_ctrl_c_forces_exit():
             if proc.poll() is None:
                 proc.kill()
                 proc.wait()
+
+
+def test_download_command_basic():
+    """Test basic download command execution."""
+    with patch("video_kb_simple.cli.SimpleDownloader") as mock_downloader:
+        mock_instance = mock_downloader.return_value
+        mock_result = PlaylistResult(
+            playlist_details=PlaylistDetails(
+                playlist_id="test",
+                playlist_type=PlaylistType.SINGLE_VIDEO,
+                title="Test Video",
+                url="https://www.youtube.com/watch?v=test",
+                video_urls=["https://www.youtube.com/watch?v=test"],
+            ),
+            video_results=[],
+            total_requested=1,
+            processing_time_seconds=1.5,
+        )
+        mock_instance.download_transcripts.return_value = mock_result
+
+        result = runner.invoke(app, ["download", "https://www.youtube.com/watch?v=test"])
+        assert result.exit_code == 0
+        mock_downloader.assert_called_once()
+
+
+def test_download_command_with_options():
+    """Test download command with various options."""
+    with patch("video_kb_simple.cli.SimpleDownloader") as mock_downloader:
+        mock_instance = mock_downloader.return_value
+        mock_result = PlaylistResult(
+            playlist_details=None,
+            video_results=[],
+            total_requested=1,
+            processing_time_seconds=1.0,
+        )
+        mock_instance.download_transcripts.return_value = mock_result
+
+        result = runner.invoke(
+            app,
+            [
+                "download",
+                "https://www.youtube.com/watch?v=test",
+                "--output",
+                "/tmp/test",
+                "--force",
+                "--lang",
+                "en,es",
+                "--max-videos",
+                "5",
+                "--verbose",
+            ],
+        )
+        assert result.exit_code == 0
+
+
+def test_download_command_error_handling():
+    """Test download command error handling."""
+    with patch("video_kb_simple.cli.SimpleDownloader") as mock_downloader:
+        mock_instance = mock_downloader.return_value
+        mock_instance.download_transcripts.side_effect = Exception("Test error")
+
+        result = runner.invoke(app, ["download", "https://www.youtube.com/watch?v=test"])
+        assert result.exit_code == 1
+        assert "Test error" in result.stdout
+
+
+def test_display_items_empty():
+    """Test _display_items with empty list."""
+    from io import StringIO
+
+    from rich.console import Console
+
+    console = Console(file=StringIO(), width=80)
+    _display_items([], "Warnings", console)
+    # Should not print anything for empty list
+
+
+def test_display_items_with_content():
+    """Test _display_items with content."""
+    from io import StringIO
+
+    from rich.console import Console
+
+    output = StringIO()
+    console = Console(file=output, width=80)
+    _display_items(["Warning 1", "Warning 2"], "Warnings", console, "yellow")
+
+    content = output.getvalue()
+    assert "Warnings (2)" in content
+    assert "Warning 1" in content
+    assert "Warning 2" in content
+
+
+def test_display_batch_results():
+    """Test _display_batch_results function."""
+    from io import StringIO
+
+    from rich.console import Console
+
+    # Create mock data
+    mock_result = PlaylistResult(
+        playlist_details=PlaylistDetails(
+            playlist_id="test",
+            playlist_type=PlaylistType.SINGLE_VIDEO,
+            title="Test Video",
+            url="https://example.com",
+            video_urls=["https://example.com"],
+        ),
+        video_results=[],
+        total_requested=1,
+        processing_time_seconds=2.5,
+    )
+
+    output = StringIO()
+    console = Console(file=output, width=80)
+    _display_batch_results(mock_result, console)
+
+    content = output.getvalue()
+    assert "Download Summary" in content
+    assert "Test Video" in content
+    assert "2.5s" in content
